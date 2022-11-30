@@ -1,0 +1,497 @@
+---
+title: "Data processing"
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+author: "John Favate"
+date: "`r Sys.time()`"
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 1500px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+```{r}
+# Prevent printing of warnings and such in the HTML
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, fig.align = "center")
+```
+
+```{r}
+library(tidyverse)
+library(scales)
+library(patchwork)
+library(parallel)
+library(imputeLCMD)
+```
+
+Load and combine the data. The columns with "-2" are technical reps because of a machine issue and are not included in the analysis.
+```{r}
+df <- bind_rows("positive" = read_csv("../../data_frames/Peaks_Pos_Normalized.csv"),
+                "negative" = read_csv("../../data_frames/Peaks_Neg_Normalized.csv"),
+                .id = "charge") %>% 
+  select(-`...1`, -contains("-2")) %>% 
+  mutate(is_standard = str_detect(compound, "[NegPos]IS")) # mark standards
+
+df
+```
+
+In total, how many non-standard compounds?
+```{r}
+df %>% 
+  filter(is_standard == FALSE) %>% 
+  pull(compound) %>% 
+  unique() %>% 
+  length()
+```
+
+How many are found in all samples? These are rows where there is never a 0. This is for both ionization modes. 
+```{r}
+df %>% 
+  filter(is_standard == FALSE) %>% 
+  filter(if_all(.cols = where(is.numeric), .fns = ~ .x != 0)) %>% 
+  pull(compound) %>% 
+  unique() %>% 
+  length()
+```
+
+### Identify the extent of missingness in the data.
+
+How many compounds contain missing values?
+```{r fig.width = 15, fig.height = 3.5}
+df %>% 
+  filter(if_any(where(is.numeric), ~.x ==0)) %>% 
+  pivot_longer(where(is.numeric)) %>% 
+  mutate(missing = value == 0) %>% 
+  group_by(charge, compound, missing) %>% 
+  tally() %>% 
+  filter(missing == TRUE) %>% 
+  ggplot(., aes(compound, charge, fill = n, label = n))+
+  geom_raster()+
+  geom_text(color = "grey50")+
+  scale_fill_viridis_c(option = "B", name = "N samples missing")+
+  theme(axis.text.x = element_text(angle = 90, vjust = .5, hjust = 1),
+        legend.position = "bottom")+
+  scale_x_discrete(labels = label_wrap(30))+
+  labs(x = NULL)
+```
+
+A function that makes graphs showing distributions of values for a compound.
+```{r}
+compound_checker <- function(x, text_pos = 3){
+  # the compound of interest
+  comp <- df %>% 
+    filter(compound == x) %>% 
+    pivot_longer(where(is.numeric)) %>% 
+    separate(name, into = c("line", "phase", "repl"), sep = "_")
+  
+  # the standards
+  stand <- df %>% 
+    filter(is_standard == TRUE) %>% 
+    pivot_longer(where(is.numeric)) %>% 
+    mutate(compound = "stds",
+           phase = "stds")
+  
+  # how many times is the compound zero
+  zero.count <- comp %>%  
+    group_by(phase, charge) %>% 
+    tally(value == 0) %>% 
+    mutate(xlabs = paste(phase, str_sub(charge, end = 3), n))
+  
+  # total missing comps
+  total.drops <- comp %>% 
+    filter(value == 0) %>% 
+    nrow()
+  
+  # graph it
+  bind_rows(comp, stand) %>% 
+    mutate(phase = factor(phase, c("e", "s", "stds"))) %>% 
+    left_join(zero.count, by = c("charge", "phase")) %>% 
+    ggplot(., aes(xlabs, 1+value, color = charge))+
+    geom_jitter(height = 0, size = .5, width = .3)+
+    scale_y_log10(labels = trans_format("log10", math_format(10^.x)))+
+    scale_x_discrete(labels = c(zero.count$xlabs, "stds"))+
+    theme_bw()+
+    theme(text = element_text(size = 12),
+          panel.grid = element_blank(),
+          axis.text.x = element_text(angle = 30, hjust = 1))+
+    labs(x = NULL,
+         y = "Peak area + 1",
+         subtitle = x)+
+    scale_color_manual(values = c("black", "red"), name = "Ionization mode", guide = "none")+
+    annotate("text", label = paste0("missing=", total.drops), y = 10^8, x = text_pos)
+}
+```
+
+Graph each compound
+```{r}
+has.missing <- df %>% 
+  filter(if_any(where(is.numeric), ~.x ==0)) %>% 
+  pull(compound) %>% 
+  unique()
+
+names(has.missing) <- has.missing
+
+plot.list <- mclapply(has.missing, compound_checker, text_pos = 2, mc.cores = 4)
+```
+
+```{r fig.width = 16, fig.height = 25}
+wrap_plots(plot.list, ncol = 5)
+```
+
+Compounds to be removed on account of having too many missing values. This is purely subjective. I try to only remove compounds that are present in both ionization modes where one mode has a lot missing and the other doesn't. But some compounds are simply missing no matter the mode. I also try to choose a mode for a compound if one of the modes appears better than the other 9less missing samples, higher peak areas overall) but if they're equivalent, I'll leave them. 
+```{r}
+(remove.me <- c(
+  "Cystathionine" = "negative", # almost completely absent in neg mode
+  "Uric acid" = "negative", # almost completely absent, only one mode
+  "Acetyl-arginine" = "negative", # 100% pos detection but many missing neg values
+  "IMP" = "negative", # good pos detection but many missing neg values
+  "4-Guanidinobutanoic acid" = "negative", # 100% pos detection but many missing neg values,
+  "L-arginino-succinate" = "negative", # 100% pos detection, less neg detection in S phase
+  "CDP-Choline" = "positive", # almost entirely missing in ex phase
+  "5-Hydroxylysine" = "positive", # almost entirely missing in ex phase,
+  "Dihydroxyacetone phosphate" = "positive", # detected better in - mode
+  "Homocysteine" = "negative", # detected better in +
+  "Malonyl-CoA" = "negative", # better detection in +
+  "Mannose-6-phosphate" = "negative", # better detected in positive
+  "3-Phosphoserine" = "negative", # none missing in +
+  "IDP" = "negative", # lots missing
+  "Fructose-6-phosphate" = "negative", # less missing in +
+  "UDP-D-Glucose" = "positive", # less missing in -
+  "Succinyl-CoA" = "positive", # less missing in -
+  "S-adenosyl-L-homocysteine" = "positive", # none missing in -, equiv otherwise
+  "5-Aminoimidazole-4-carboxamide ribonucleotide" = "positive", # less missing in -
+  "Propionyl CoA" = "positive", # better in - mode
+  "Itaconic acid" = "positive", # none missing in -
+  "Trehalose-6-phosphate" = "positive", # almost entirely missing
+  "6-Phosphogluconate" = "positive", # neg has no missing values
+  "Butyryl CoA" = "positive" # + has less missing values
+  ) %>% 
+  enframe(name = "compound", value = "charge"))
+```
+
+Remove them.
+```{r}
+(reduced.df <- anti_join(df, remove.me, by = c("compound", "charge")))
+```
+
+When values are missing in one replicate, are they missing in the other? In the below graph, 0 = always present, 1 = missing in one rep, 2 = missing both.
+```{r}
+missing.df <- reduced.df %>% 
+  filter(compound %in% has.missing) %>% 
+  pivot_longer(where(is.numeric)) %>% 
+  separate(name, into = c("line", "phase", "repl"), sep = "_") %>% 
+  pivot_wider(names_from = "repl", values_from = value)
+
+missing.df %>% 
+  mutate(r1z = r1 == 0,
+         r2z = r2 == 0,
+         tz = r1z + r2z) %>% 
+  ggplot(., aes(tz))+
+  geom_bar()
+```
+
+### Imputation
+
+I'll be using the method here https://github.com/WandeRum/MVI-evaluation to evaluate different imputation methods and pick one to impute values with. Create data frames suitable for the program. 
+
+The script is written in such a way that the script they want me to pull functions from, `Imputation evaluations.R`, sources another script called `Impute_wrapper.R` and it leads to some sort of path error, because it's not in the working directory. Hence I've altered their code to resolve the problem. Specifically, in `Imputations evaluations.R`
+```{r eval = FALSE}
+# this
+source('Impute_wrapper.R')
+
+# becomes this
+source('/data2/john/projects/ltee_massspec/MVI-evaluation/Impute_wrapper.R')
+```
+
+And in `Impute_wrapper` and in `Imputations evaluations.R`
+```{r eval = FALSE}
+# this
+source('MVI_global.R')
+
+# becomes this
+source('/data2/john/projects/ltee_massspec/MVI-evaluation/MVI_global.R')
+```
+
+All I've done is put absolute paths there. **If you're running this on your own system, you'll likely need to alter these paths.**
+
+```{r}
+source("../../MVI-evaluation/Imputation evaluations.R")
+```
+
+This is the data structure in the vignette
+```{r}
+read_csv("../../MVI-evaluation/Real_data_DM.csv", n_max = 5)
+```
+
+Create input data suitable for use here, where I can actually evaluate the imputation methods. Namely, complete data only.
+```{r}
+input.dfs <- reduced.df %>% 
+  pivot_longer(where(is.numeric)) %>% 
+  filter(!(compound %in% has.missing)) %>%
+  separate(name, into = c("line", "phase", "repl")) %>% 
+  split(list(.$charge, .$phase)) %>% 
+  map(function(x){
+    tmp <- x %>% 
+      unite("sample", c(line, repl)) %>% 
+      select(compound, sample, value) %>% 
+      pivot_wider(names_from = compound, values_from = value) %>% 
+      select(sample, everything()) %>% 
+      column_to_rownames("sample") 
+  })
+```
+
+There's also a vector of groups to go with each of the above data frames
+```{r}
+group.list <- sapply(input.dfs, function(x){
+  rownames(x) %>% str_remove("_r[12]") %>% as_factor()
+}, simplify = FALSE)
+```
+
+Run their function that tests the various imputation methods. I've tried all their available methods but and have excluded ones that performed poorly (SVD) and ones that don't make sense, like mean and median.
+```{r}
+df.vec <- setNames(names(input.dfs), names(input.dfs))
+
+mnar.list <- lapply(df.vec, function(x) {
+  # pick a df from the list by name
+  in.df <- input.dfs[[x]]
+  
+  # run the function
+  MNAR_gen_imp(
+    data = in.df,
+    impute_list = c(
+      'kNN_wrapper',
+      'QRILC_wrapper',
+      'HM_wrapper',
+      'Zero_wrapper',
+      "RF_wrapper"
+    ),
+    cores = 5
+  )
+})
+```
+
+They provide a set of functions that produce diagnostic plots helping the user evaluate the performance of the various imputation methods. I run those below, retrieve the data frames from them, and make plots. A plotting function:
+```{r}
+plot_func <- function(df, yval, ylab, xlab) {
+  df %>%
+    ggplot(., aes_string("Miss_Prop", yval, color = "Method")) +
+    geom_point() +
+    geom_line() +
+    theme_bw() +
+    theme(text = element_text(size = 13),
+          panel.grid = element_blank()) +
+    labs(x = xlab,
+         y = ylab) +
+    scale_color_brewer(palette = "Set1") +
+    facet_wrap( ~ fac, ncol = 4, scales = "free_y")
+}
+```
+
+
+Cal plots
+```{r }
+cal.plot.df <- lapply(df.vec, function(y) {
+  NRMSE_cal_plot(mnar.list[[y]], plot = FALSE) %>%
+    .[[2]]
+}) %>%
+  bind_rows(.id = "conds") %>%
+  separate(conds, into = c("charge", "phase"), sep = "\\.") %>%
+  mutate(
+    phase = case_when(phase == "e" ~ "Ex",
+                      phase == "s" ~ "St"),
+    charge = case_when(charge == "positive" ~ "(+)",
+                       charge == "negative" ~ "(-)")
+  ) %>%
+  unite("fac", phase, charge, sep = " ")
+
+# make the plot
+cal.plot <- plot_func(cal.plot.df, "NRMSE", "NRMSE", NULL)
+```
+
+rank plots
+```{r}
+rank.plot.df <- lapply(df.vec, function(y) {
+  NRMSE_rank_cal_plot(mnar.list[[y]], plot = FALSE) %>%
+    .[[2]]
+}) %>%
+  bind_rows(.id = "conds") %>%
+  separate(conds, into = c("charge", "phase"), sep = "\\.") %>%
+  mutate(
+    phase = case_when(phase == "e" ~ "Ex",
+                      phase == "s" ~ "St"),
+    charge = case_when(charge == "positive" ~ "(+)",
+                       charge == "negative" ~ "(-)")
+  ) %>%
+  unite("fac", phase, charge, sep = " ")
+
+rank.plot <- plot_func(rank.plot.df, "NRMSE_Rank", "NRMSE Rank", NULL)
+```
+
+PCA procrustes
+```{r}
+pcapc.plot.df <- lapply(df.vec, function(y) {
+  Procrustes_cal_plot(mnar.list[[y]],
+                      DR = "PCA",
+                      nPCs = 2,
+                      plot = FALSE) %>%
+    .[[2]]
+}) %>%
+  bind_rows(.id = "conds") %>%
+  separate(conds, into = c("charge", "phase"), sep = "\\.") %>%
+  mutate(
+    phase = case_when(phase == "e" ~ "Ex",
+                      phase == "s" ~ "St"),
+    charge = case_when(charge == "positive" ~ "(+)",
+                       charge == "negative" ~ "(-)")
+  ) %>%
+  unite("fac", phase, charge, sep = " ")
+
+pcapc.plot <- plot_func(pcapc.plot.df, "Pro_SS", "PCA Procrustes SS", "Missing proportion")
+```
+
+The t-test one is designed for use with an experiment that has two groups, I have too many possible groups (line, phase, age, replicate, etc.) to make use of this one. So I won't do it. 
+
+Put together the final figure
+```{r fig.width = 9, fig.height = 7.25}
+(cal.plot / rank.plot / pcapc.plot) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+
+ggsave(plot = last_plot(), filename = "../../new_figures/imputation_evaluation.png", width = 9, height = 7.25)
+```
+
+Judging by this, it appears that the QRILC (Quantile Regression Imputation of Left-Censored data) method will work, it has competition with half-minimum (HM), this makes sense due to the nature of the data. Performance similar to HM is expected, because they'll likely settle on similar values but the authors of the paper recommend QRILC over it so we'll go with that.
+
+### Perform imputation
+
+Separate the data to phase/charge specific datasets.
+```{r}
+df.list <- reduced.df %>% 
+  pivot_longer(where(is.numeric)) %>% 
+  separate(name, into = c("line", "phase", "repl"), sep = "_") %>% 
+  split(list(.$charge, .$phase)) %>% 
+  map(function(x){
+    x %>% 
+      unite("sample", line, repl) %>% 
+      select(sample, compound, where(is.numeric)) %>% 
+      mutate(value = ifelse(value == 0, NA, value)) %>% 
+      pivot_wider(names_from = compound, values_from = value) %>% 
+      column_to_rownames("sample")
+  })
+
+head(df.list[[1]])
+```
+
+Perform the imputations, reshape the data to its original structure 
+```{r}
+imp.df <- lapply(df.list, function(x){
+  set.seed(1)
+  
+  QRILC_wrapper(x) %>% 
+    rownames_to_column("sample") %>% 
+    separate(sample, into = c("line", "repl"), sep = "_") %>% 
+    pivot_longer(where(is.numeric), values_to = "peak_area", names_to = "compound")
+}) %>% 
+  bind_rows(.id = "sample") %>% 
+  separate(sample, into = c("charge", "phase"), sep = "\\.") %>% 
+  unite("sample", line, phase, repl, sep = "_")
+```
+
+Mark imputed values in the data
+```{r}
+was.impd <- reduced.df %>% 
+  pivot_longer(where(is.numeric), names_to = "sample") %>% 
+  filter(value == 0) %>% 
+  select(-value, -is_standard) %>% 
+  mutate(was_imputed = TRUE)
+```
+
+```{r}
+final.df <- left_join(imp.df, was.impd, by = c("sample", "compound", "charge")) %>% 
+  mutate(was_imputed = ifelse(is.na(was_imputed), FALSE, was_imputed),
+         is_standard = str_detect(compound, "[NegPos]IS")) %>% 
+  select(charge, sample, compound, is_standard, was_imputed, peak_area) %>% 
+  separate(sample, into = c("line", "phase", "repl"), sep = "_")
+
+head(final.df)
+```
+
+Check all the imputed values to see that they make sense, they should all be low.
+```{r fig.width = 13.5, fig.height = 12}
+impd.comps <- final.df %>% 
+  filter(was_imputed == TRUE) %>% 
+  pull(compound) %>% 
+  unique()
+
+final.df %>% 
+  filter(compound %in% impd.comps) %>% 
+  mutate(charge = str_sub(charge, start = 1, end = 1)) %>% 
+  unite("sample", charge, phase) %>% 
+  ggplot(., aes(sample, peak_area, color = was_imputed))+
+  geom_jitter(height = 0, width = .2, size = .5)+
+  facet_wrap(~ compound, scales = "free_x")+
+  scale_color_manual(values = c("black", "purple"))+
+  scale_y_log10(labels = trans_format("log10", math_format(10^.x)), breaks = breaks_log(n = 4))+
+  theme_bw()+
+  theme(panel.grid = element_blank())
+```
+
+The intensities are normalized to the weighted average of the stable isotope labeled internal standards, but I'm also going to normalize them again so that the values are proportional to the total peak area.
+```{r}
+final.df2 <- final.df %>% 
+  group_by(charge, line, phase, repl) %>% 
+  mutate(n_peak_area = peak_area / sum(peak_area)) %>% 
+  ungroup()
+```
+
+Lastly, some compounds have issues, for example, Uracil. There's something ionization mode specific here but I'm not sure which one is correct. At least both of them agree on a decrease from - to +, but the difference is way bigger in stationary phase. Many of these were discovered as the analysis progressed and they came up as contributing to PCA or something. 
+```{r}
+final.df2 %>% 
+  filter(compound == "Uracil") %>% 
+  ggplot(., aes(charge, n_peak_area, fill = phase))+
+  geom_boxplot()+
+  scale_y_log10()
+```
+
+Remove these odd compounds 
+```{r}
+final.df3 <- final.df2 %>% 
+  filter(compound != "Uracil")
+```
+
+When all is said and done, how many total 
+```{r}
+# compounds in total
+tot.comps <- final.df3 %>% 
+  pull(compound) %>% 
+  unique() %>% 
+  length()
+
+# detected in all
+det.in.all <- final.df3 %>% 
+  filter(was_imputed == FALSE) %>% 
+  group_by(compound, charge) %>% 
+  tally() %>% 
+  ungroup() %>% 
+  filter(n == 56) %>% 
+  arrange(compound, desc(n)) %>% 
+  group_by(compound) %>% 
+  filter(row_number()==1) %>% 
+  ungroup() %>% 
+  nrow()
+
+paste("There were", tot.comps, "in total,", det.in.all, "of which were detected in all and", tot.comps - det.in.all, "had some imputation done to them")
+```
+
+Save it 
+```{r}
+write_csv(final.df3, "../../data_frames/targeted_with_imps.csv")
+```
+
+```{r}
+sessionInfo()
+```
+

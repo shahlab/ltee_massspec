@@ -1,0 +1,321 @@
+---
+title: "Figure 1"
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+author: "John Favate"
+date: "`r Sys.time()`"
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 1500px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+```{r}
+# Prevent printing of warnings and such in the HTML
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, fig.align = "center")
+```
+
+```{r}
+library(tidyverse)
+
+df <- read_csv("../../data_frames/targeted_with_imps.csv") %>% 
+  filter(is_standard == FALSE) %>% 
+  unite("cc", compound, charge, sep = " ", remove = FALSE) %>% 
+  unite("ccp", compound, charge, phase, sep = " ", remove = FALSE)
+
+mut.lines <- c("A-1", "A-2", "A-3", "A-4", "A+3", "A+6")
+
+clean.names <- data.frame(line = unique(df$line)) %>%
+  mutate(clean = case_when(
+    grepl("ap", line) ~ str_replace(line, "ap", "A+"),
+    grepl("am", line) ~ str_replace(line, "am", "A-"),
+    grepl("rel", line) ~ str_replace(line, "rel60", "R0")
+  ))
+
+df <- left_join(df, clean.names) %>% 
+  mutate(is_mutator = clean %in% mut.lines)
+```
+
+```{r}
+all.comps <- unique(df$ccp)
+
+# this sort of has a problem where it regex's the + but it's ok
+my.comps <- c("NAD+", "NADH", "Aspartate", "Nicotinamide ribotide", "Nicotinate", "Arginine", "Ornithine", "N-acetyl-L-ornithine", "N-acetyl-glutamate", "L-arginino-succinate", "Glutamate", "Citrulline", "Aspartate", "Carbamoyl phosphate", "Glutamine")
+
+select.comps <- sapply(my.comps, function(x){
+  all.comps[grepl(x, all.comps)]
+}) %>% 
+  unlist() %>% 
+  unique()
+```
+
+Dot/boxplots for figures that require them
+```{r}
+# dot_func <- function(x) {
+#   # get the comps and clean it up
+#   comp.df <- df %>%
+#     filter(ccp == x)
+#   
+#   compz <- unique(comp.df$compound)
+#   
+#   # get evo values
+#   evo.pa <- comp.df %>%
+#     filter(!grepl("R0", clean)) %>%
+#     group_by(clean, phase, cc) %>%
+#     summarise(evompa = mean(n_peak_area)) %>%
+#     ungroup()
+#   
+#   # get ancestral values
+#   anc.pa <- comp.df %>%
+#     filter(grepl("R0", clean)) %>%
+#     group_by(phase, cc) %>%
+#     summarise(ancmpa = mean(n_peak_area)) %>%
+#     ungroup()
+#   
+#   # combine and calc changes
+#   fc.df <-
+#     left_join(evo.pa, anc.pa, by = c("phase", "cc")) %>%
+#     mutate(l2rat = log2(evompa / ancmpa))
+#   
+#   # plot it
+#   p <- fc.df %>%
+#     ggplot(., aes(l2rat, "")) +
+#     geom_vline(aes(xintercept = 0))+
+#     geom_boxplot(color = "orange", outlier.size = NULL, outlier.alpha = 0)+
+#     geom_jitter(size = 1.2, width = 0, color = "orange", alpha = .5) +
+#     theme(
+#       text = element_text(size = 13),
+#       axis.ticks.y = element_blank(),
+#       panel.grid = element_blank(),
+#       panel.background = element_blank(),
+#       axis.line.y = element_blank(),
+#       axis.line.x = element_line()
+#     ) +
+#     labs(x = NULL,
+#          y = NULL)+
+#     scale_x_continuous(breaks = scales::breaks_pretty(3))
+#   
+#   fname <- paste0(
+#     "../../hms/",
+#     str_replace_all(x, " ", "_"),
+#     ".png"
+#   )
+#   
+#   ggsave(plot = p, filename = fname, width = 1.5, height = .5)
+# }
+```
+
+This saves all of these figures, no sense in looking at them all
+```{r}
+# parallel::mclapply(select.comps, dot_func, mc.cores = 8)
+```
+
+Similar plots except for the genes
+```{r fig.width = 1.5, fig.height = .5}
+all.data <- read_csv("/data/john/projects/3ltee/data_frames/all_data.csv") %>% 
+  mutate(line = str_replace(line, "Ara", "A"))
+
+genes <- c(paste0("nad", LETTERS[1:5]), "pncA", "pncB", "pnuC", "nadR", paste0("arg", LETTERS[1:9]), "gabT", "carB", "carA")
+
+# all.data %>%
+#   filter(k12_name %in% genes) %>%
+#   split(.$k12_name) %>%
+#   map(function(x) {
+#     p <- x %>%
+#       ggplot(., aes(ds_log2foldchange_rna, ""))+
+#       geom_vline(aes(xintercept = 0)) +
+#       geom_boxplot(color = "forestgreen",
+#                    outlier.size = NULL,
+#                    outlier.alpha = 0) +
+#       geom_jitter(
+#         size = 1.2,
+#         width = 0,
+#         color = "forestgreen",
+#         alpha = .5
+#       ) +
+#       theme(
+#         text = element_text(size = 13, color = "forestgreen"),
+#         axis.ticks.y = element_blank(),
+#         panel.grid = element_blank(),
+#         panel.background = element_blank(),
+#         axis.line.y = element_blank(),
+#         axis.line.x = element_line()
+#       ) +
+#       labs(x = NULL,
+#            y = NULL) +
+#       scale_x_continuous(breaks = scales::breaks_pretty(3))
+#     
+#     fname <- paste0("../../hms/",
+#                     unique(x$k12_name),
+#                     ".png")
+#     
+#     ggsave(
+#       plot = p,
+#       filename = fname,
+#       width = 1.5,
+#       height = .5
+#     )
+#     
+#     return(p)
+#   })
+```
+
+### heatmap versions
+
+```{r fig.width = 1.9, fig.height = .68}
+hm_func <- function(x) {
+  # get the comps and clean it up
+  comp.df <- df %>%
+    filter(ccp == x)
+  
+  compz <- unique(comp.df$compound)
+  
+  # get evo values
+  evo.pa <- comp.df %>%
+    filter(!grepl("R0", clean)) %>%
+    group_by(clean, phase, cc) %>%
+    summarise(evompa = mean(n_peak_area)) %>%
+    ungroup()
+  
+  # get ancestral values
+  anc.pa <- comp.df %>%
+    filter(grepl("R0", clean)) %>%
+    group_by(phase, cc) %>%
+    summarise(ancmpa = mean(n_peak_area)) %>%
+    ungroup()
+  
+  # combine and calc changes
+  fc.df <-
+    left_join(evo.pa, anc.pa, by = c("phase", "cc")) %>%
+    mutate(l2rat = log2(evompa / ancmpa))
+  
+  # plot it
+  p <- fc.df %>%
+    mutate(l2rat = case_when(
+      l2rat > 3 ~ 3, 
+      l2rat < -3 ~ -3,
+      TRUE ~ l2rat
+    )) %>% 
+    ggplot(., aes(clean, cc, fill = l2rat))+
+    geom_raster()+
+    scale_fill_gradientn(colors = c("indianred", "white", "steelblue"), limits = c(-3,3), guide = "none")+
+    labs(x = NULL, y = NULL)+
+    theme_bw()+
+    theme(text = element_text(size = 13),
+          panel.grid = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text.y = element_blank(),
+          axis.text.x = element_text(angle = 90, vjust = .5, hjust = 1, color = "forestgreen"))
+
+  fname <- paste0(
+    "../../figures/hms/",
+    str_replace_all(x, " ", "_"),
+    ".png"
+  )
+
+  ggsave(plot = p, filename = fname, width = 1.9, height = .7)
+}
+
+parallel::mclapply(select.comps, hm_func, mc.cores = 2)
+```
+
+```{r fig.width = 1.9, fig.height = .66}
+all.data %>%
+  filter(k12_name %in% genes) %>%
+  split(.$k12_name) %>%
+  map(function(x) {
+    p <- x %>%
+    mutate(ds_log2foldchange_rna = case_when(
+      ds_log2foldchange_rna > 3 ~ 3, 
+      ds_log2foldchange_rna < -3 ~ -3,
+      TRUE ~ ds_log2foldchange_rna
+    )) %>% 
+    ggplot(., aes(line, k12_name, fill = ds_log2foldchange_rna))+
+    geom_raster()+
+    scale_fill_gradientn(colors = c("indianred", "white", "steelblue"), limits = c(-3,3), guide = "none")+
+    labs(x = NULL, y = NULL)+
+    theme_bw()+
+    theme(text = element_text(size = 13),
+          panel.grid = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text.y = element_blank(),
+          axis.text.x = element_text(angle = 90, vjust = .5, hjust = 1, color = "darkorchid"))
+    
+    fname <- paste0("../../figures/hms/",
+                    unique(x$k12_name),
+                    ".png")
+    
+    ggsave(
+      plot = p,
+      filename = fname,
+      width = 1.9,
+      height = .7
+    )
+    
+    return(p)
+  })
+```
+
+I need a legend
+```{r}
+threshold <- 3
+
+scale.labels <- c(paste("\u2264", paste0("-", threshold), sep = ""),
+                  -threshold/2,
+                  0,
+                  threshold/2,
+                  paste("\u2265", threshold, sep = ""))
+
+all.data %>%
+  mutate(line = str_remove(line, "ra")) %>%
+  filter(k12_name %in% "nadA") %>%
+  split(.$k12_name) %>%
+  map(function(x) {
+    p <- x %>%
+      mutate(
+        ds_log2foldchange_rna = case_when(
+          ds_log2foldchange_rna > 3 ~ 3,
+          ds_log2foldchange_rna < -3 ~ -3,
+          TRUE ~ ds_log2foldchange_rna
+        )
+      ) %>%
+      ggplot(., aes(line, k12_name, fill = ds_log2foldchange_rna)) +
+      geom_raster() +
+      scale_fill_gradientn(
+        colors = c("indianred", "white", "steelblue"),
+        limits = c(-3, 3),
+        name = expression(paste(log[2], "(fold-change)")),
+        breaks = c(-3,-1.5, 0, 1.5, 3),
+        labels = scale.labels
+      ) +
+      labs(x = NULL, y = NULL) +
+      theme_bw() +
+      theme(
+        text = element_text(size = 13),
+        panel.grid = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text.y = element_blank(),
+        axis.text.x = element_text(angle = 90, vjust = .5)
+      )
+    
+    fname <- paste0("../../hms/",
+                    unique(x$k12_name),
+                    ".png")
+    
+    ggsave(
+      plot = p,
+      filename = "../../figures/hms/guide.png",
+      width = 4,
+      height = 3
+    )
+    
+    return(p)
+  })
+```
+

@@ -1,0 +1,128 @@
+---
+title: "Arg supp"
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+author: "John Favate"
+date: "`r Sys.time()`"
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 1500px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+```{r}
+# Prevent printing of warnings and such in the HTML
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, fig.align = "center")
+```
+
+```{r}
+library(tidyverse)
+library(ggpubr)
+library(patchwork)
+```
+
+```{r}
+df <- read_csv("../../data_frames/targeted_with_imps.csv") %>% 
+  filter(is_standard == FALSE) %>% 
+  unite("cc", compound, charge, sep = " ", remove = FALSE) %>% 
+  unite("ccp", compound, charge, phase, sep = " ", remove = FALSE)
+
+mut.lines <- c("A-1", "A-2", "A-3", "A-4", "A+3", "A+6")
+
+clean.names <- data.frame(line = unique(df$line)) %>%
+  mutate(clean = case_when(
+    grepl("ap", line) ~ str_replace(line, "ap", "A+"),
+    grepl("am", line) ~ str_replace(line, "am", "A-"),
+    grepl("rel", line) ~ str_replace(line, "rel60", "R0")
+  ))
+
+# combine them and change the one compounds name so it matches the name on fig1
+df <- left_join(df, clean.names) %>% 
+  mutate(is_mutator = clean %in% mut.lines,
+         compound = ifelse(compound == "Nicotinamide ribotide", "Nicotinamide mononucleotide", compound))
+```
+
+Load some functions required for making graphs for this figure
+```{r}
+source("./figure_funcs.R")
+```
+
+### dotplots
+
+This is a named list of compounds I want in the plot, the name is arbitrary but describes the pathway
+```{r}
+clist <- list(
+  "arg" = c(
+    "Aspartate",
+    "Carbamoyl phosphate",
+    "Citrulline",
+    "Glutamate",
+    "Glutamine",
+    "L-arginino-succinate",
+    "N-acetyl-glutamate",
+    "N-acetyl-L-ornithine",
+    "Ornithine",
+    "S-adenosyl-L-methionine",
+    "Arginine"
+  ),
+  "aa" = c(
+    "Alanine",
+    "Arginine",
+    "Aspartate",
+    "Asparagine",
+    "Cystine",
+    "Glutamine",
+    "Glutamate",
+    "Glycine",
+    "Histidine",
+    "Isoleucine",
+    "Leucine",
+    "Lysine",
+    "Methionine",
+    "Phenylalanine",
+    "Proline",
+    "Serine",
+    "Threonine",
+    "Tryptophan",
+    "Tyrosine",
+    "Valine"
+  )
+)
+```
+
+```{r}
+dp.list <- lapply(clist, dotplot_graph, n = 2)
+
+dp.list.med <- lapply(clist, dotplot_med_graph)
+
+dp.list
+dp.list.med
+```
+
+This gives the range of changes over both ionization modes.
+```{r}
+lapply(clist, range_func)
+```
+
+### Final figure
+
+```{r fig.width = 6.52, fig.height = 7}
+top <- dp.list$arg
+
+bottom <- dp.list.med$aa
+
+ff <- (top / bottom) + plot_layout(heights = c(.35, .65), guides = "collect") + plot_annotation(tag_levels = "A")
+
+ff
+```
+
+```{r}
+ggsave(ff, filename = "../../figures/arg_supp.pdf", width = 6.51, height = 7.6)
+```
+

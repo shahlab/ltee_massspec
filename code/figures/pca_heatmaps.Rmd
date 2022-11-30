@@ -1,0 +1,260 @@
+---
+title: "PCA heatmaps"
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+author: "John Favate"
+date: "`r Sys.time()`"
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 1500px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+```{r}
+# Prevent printing of warnings and such in the HTML
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, fig.align = "center")
+```
+
+```{r}
+library(tidyverse)
+library(broom)
+library(ggrepel)
+library(patchwork)
+library(scales)
+library(ggplotify)
+library(circlize)
+library(ComplexHeatmap)
+
+df <- read_csv("../../data_frames/targeted_with_imps.csv") %>% 
+  filter(is_standard == FALSE)
+
+clean.names <- data.frame(line = unique(df$line)) %>%
+  mutate(clean = case_when(
+    grepl("ap", line) ~ str_replace(line, "ap", "A+"),
+    grepl("am", line) ~ str_replace(line, "am", "A-"),
+    grepl("rel", line) ~ str_replace(line, "rel60", "R0")
+  )) %>% 
+  mutate(clean = ifelse(clean == "A-2", "A-2L", clean))
+
+mut.lines <- c("A-1", "A-2", "A-3", "A-4", "A+3", "A+6")
+
+df <- left_join(df, clean.names)
+```
+
+### PC1 metabolites for the growth phase specific PCAs
+
+In lieu of rerunning the PCA, read in the rds files from the pca figure.
+```{r}
+pca.input.list <- read_rds("../../rds_files/fig4_pca_input_list.rds")
+pca.res.list <- read_rds("../../rds_files/fig4_pca_res_list.rds")
+```
+
+Colors for heatmaps
+```{r}
+# max of any of those matrices
+biggest.val <- lapply(names(pca.res.list), function(x){
+  # get the top n PC1 compounds
+  top.pc1 <- pca.res.list[[x]]$rotation %>%
+    as.data.frame() %>%
+    arrange(desc(abs(PC1))) %>%
+    slice(1:15) %>%
+    rownames()
+  
+  # get the top n PC2 compounds
+  top.pc2 <- pca.res.list[[x]]$rotation %>%
+    as.data.frame() %>%
+    arrange(desc(abs(PC2))) %>%
+    slice(1:15) %>%
+    rownames()
+  
+  both.pcs <- c(top.pc1, top.pc2)
+  
+  # find their values in the data
+  hm.df <- pca.input.list[[x]] %>%
+    select(all_of(both.pcs)) %>%
+    rownames_to_column("line") %>%
+    pivot_longer(where(is.numeric)) %>%
+    group_by(name) %>%
+    mutate(stdv = sd(value),
+           meanz = mean(value)) %>%
+    ungroup() %>%
+    mutate(z = (value - meanz) / stdv) %>%
+    select(line, name, z) %>%
+    pivot_wider(names_from = line, values_from = z) %>%
+    column_to_rownames("name") %>%
+    as.matrix()
+  
+  # find the max of those
+  max(abs(hm.df))
+}) %>% 
+  unlist() %>% 
+  max()
+
+# round up to nearest tenths place
+val <- ceiling(biggest.val*10) / 10
+
+hm.cols <- colorRamp2(c(-val,0,val), c("indianred", "white", "steelblue"))
+```
+
+```{r fig.width = 6, fig.height = 3.5}
+hm.list <- sapply(names(pca.res.list), function(x) {
+  # get the top n PC1 compounds
+  top.pc1 <- pca.res.list[[x]]$rotation %>%
+    as.data.frame() %>%
+    arrange(desc(abs(PC1))) %>%
+    slice(1:15) %>%
+    rownames()
+  
+  # get their compound abundances and convert to Z scores across lines
+  hm.df <- pca.input.list[[x]] %>%
+    select(all_of(top.pc1)) %>%
+    rownames_to_column("line") %>%
+    pivot_longer(where(is.numeric)) %>%
+    group_by(name) %>%
+    mutate(stdv = sd(value),
+           meanz = mean(value)) %>%
+    ungroup() %>%
+    mutate(z = (value - meanz) / stdv) %>%
+    select(line, name, z) %>%
+    pivot_wider(names_from = line, values_from = z) %>%
+    column_to_rownames("name") %>%
+    as.matrix()
+  
+  # remove the pos/neg
+  rownames(hm.df) <-
+    str_replace(rownames(hm.df), "_negative", " (-)") %>%
+    str_replace("_positive", " (+)")
+  
+  # create the annotations, mutators
+  mut <- sapply(colnames(hm.df), function(x) {
+    if (x %in% mut.lines) {
+      return("Yes")
+    } else {
+      return("No")
+    }
+  })
+  
+  # the annotation data
+  hma.cols <-
+    list("Mutator" = c("Yes" = "orange3", "No" = "steelblue3"))
+  
+  hma <-
+    HeatmapAnnotation(
+      "Mutator" = mut,
+      col = hma.cols,
+      simple_anno_size = unit(1, "mm"),
+      height = unit(1, "mm"),
+      annotation_name_gp = gpar(fontsize = 10)
+    )
+  
+  # the heatmap
+  p.hm <-
+    Heatmap(
+      hm.df,
+      col = hm.cols,
+      name = "Row Z",
+      column_names_gp = grid::gpar(fontsize = 10),
+      row_names_gp = grid::gpar(fontsize = 10),
+      top_annotation = hma,
+      row_dend_width = unit(5, "mm"),
+      column_dend_height = unit(6, "mm"),
+      column_title = paste("PC1", x),
+      column_title_gp = gpar(fontsize = 10)
+    ) %>%
+    as.ggplot()
+  
+}, simplify = FALSE)
+```
+
+PC2 heatmaps
+```{r fig.width = 6, fig.height = 3.5}
+hm.list2 <- sapply(names(pca.res.list), function(x) {
+  # get the top n PC1 compounds
+  top.pc2 <- pca.res.list[[x]]$rotation %>%
+    as.data.frame() %>%
+    arrange(desc(abs(PC2))) %>%
+    slice(1:15) %>%
+    rownames()
+  
+  # get their compound abundances and convert to Z scores across lines
+  hm.df <- pca.input.list[[x]] %>%
+    select(all_of(top.pc2)) %>%
+    rownames_to_column("line") %>%
+    pivot_longer(where(is.numeric)) %>%
+    group_by(name) %>%
+    mutate(stdv = sd(value),
+           meanz = mean(value)) %>%
+    ungroup() %>%
+    mutate(z = (value - meanz) / stdv) %>%
+    select(line, name, z) %>%
+    pivot_wider(names_from = line, values_from = z) %>%
+    column_to_rownames("name") %>%
+    as.matrix()
+  
+  # remove the pos/neg
+  rownames(hm.df) <-
+    str_replace(rownames(hm.df), "_negative", " (-)") %>%
+    str_replace("_positive", " (+)")
+  
+  # create the annotations, mutators
+  mut <- sapply(colnames(hm.df), function(x) {
+    if (x %in% mut.lines) {
+      return("Yes")
+    } else {
+      return("No")
+    }
+  })
+  
+  # the annotation data
+  hma.cols <-
+    list("Mutator" = c("Yes" = "orange3", "No" = "steelblue3"))
+  
+  hma <-
+    HeatmapAnnotation(
+      "Mutator" = mut,
+      col = hma.cols,
+      simple_anno_size = unit(1, "mm"),
+      height = unit(1, "mm"),
+      annotation_name_gp = gpar(fontsize = 10)
+    )
+  
+  # the heatmap
+  p.hm <-
+    Heatmap(
+      hm.df,
+      col = hm.cols,
+      name = "Row Z",
+      column_names_gp = grid::gpar(fontsize = 10),
+      row_names_gp = grid::gpar(fontsize = 10),
+      top_annotation = hma,
+      row_dend_width = unit(5, "mm"),
+      column_dend_height = unit(6, "mm"),
+      column_title = paste("PC2", x),
+      column_title_gp = gpar(fontsize = 10)
+    ) %>%
+    as.ggplot()
+  
+}, simplify = FALSE)
+```
+
+```{r fig.width = 6.5, fig.height = 7.5}
+ff1 <- (hm.list$Exponential / hm.list2$Exponential) + plot_annotation(tag_levels = "A")
+
+ff2 <- hm.list$Stationary / hm.list2$Stationary + plot_annotation(tag_levels = "A")
+
+ff1
+
+ff2
+```
+
+Save it
+```{r}
+ggsave(plot = ff1, filename = "../../figures/pca_ex_hms.pdf", width = 6.5, height = 7.5)
+ggsave(plot = ff2, filename = "../../figures/pca_st_hms.pdf", width = 6.5, height = 7.5)
+```

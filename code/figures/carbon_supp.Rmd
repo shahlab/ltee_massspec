@@ -1,0 +1,206 @@
+---
+title: Carbon supp
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+author: "John Favate"
+date: "`r Sys.time()`"
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 1500px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+```{r}
+# Prevent printing of warnings and such in the HTML
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, fig.align = "center")
+```
+
+```{r}
+library(tidyverse)
+library(ggpubr)
+library(patchwork)
+```
+
+```{r}
+df <- read_csv("../../data_frames/targeted_with_imps.csv") %>% 
+  filter(is_standard == FALSE) %>% 
+  unite("cc", compound, charge, sep = " ", remove = FALSE) %>% 
+  unite("ccp", compound, charge, phase, sep = " ", remove = FALSE)
+
+mut.lines <- c("A-1", "A-2", "A-3", "A-4", "A+3", "A+6")
+
+clean.names <- data.frame(line = unique(df$line)) %>%
+  mutate(clean = case_when(
+    grepl("ap", line) ~ str_replace(line, "ap", "A+"),
+    grepl("am", line) ~ str_replace(line, "am", "A-"),
+    grepl("rel", line) ~ str_replace(line, "rel60", "R0")
+  ))
+
+# combine them and change the one compounds name so it matches the name on fig1
+df <- left_join(df, clean.names) %>% 
+  mutate(is_mutator = clean %in% mut.lines,
+         compound = ifelse(compound == "Nicotinamide ribotide", "Nicotinamide mononucleotide", compound))
+```
+
+Source the functions for the graph
+```{r}
+source("figure_funcs.R")
+```
+
+carbon compounds
+```{r}
+glycolysis <- c(
+  "Glucose",
+  "Glucose-6-phosphate",
+  "Fructose-6-phosphate",
+  "Fructose-1 6-bisphosphate",
+  "D-Glyceraldehyde-3-phosphate",
+  # no 3-phospho-D-glyceroyl phosphate
+  "3-Phosphoglycerate",
+  "Dihydroxyacetone phosphate",
+  "Glycerol-3-phosphate",
+  # no 2-phosphoglycerate
+  "Phosphoenolpyruvate",
+  "Pyruvate"
+)
+
+gluconeogenesis <- c(
+  "Malate"
+  # no oxaloacetate, rest are redundant
+)
+
+ppp <- c(
+  "Glucose-6-phosphate",
+  # no 6-phospho D-glucono-1,5-lactone
+  # no D-gluconate 6-phosphate
+  "Ribulose-5-phosphate",
+  # no D-xylulose 5-phosphate
+  "D-Glyceraldehyde-3-phosphate"
+  # no sedoheptulose 7 phosphate but I have the bisphosphate one
+  # F6P is redundant
+  # no erythrose 4 phosphate
+)
+
+tcac <- c(
+  # no oxaloacetate
+  # no citrate somehow
+  "Aconitate",
+  "Isocitrate",
+  "a-ketoglutarate",
+  "Succinyl-CoA",
+  "Succinate",
+  "Fumarate",
+  "Malate"
+)
+
+# the entire glyoxylate shunt is redundant or absent, and i don't have glyoxylate
+# of course, and we can't detect acetate
+
+# ED pathway all redundant or missing
+```
+
+```{r}
+carbon <- unique(c(glycolysis, gluconeogenesis, ppp, tcac))
+```
+
+```{r}
+# get the comps and clean it up
+comp.df <- df %>%
+  filter(phase == "e") %>%
+  mutate(
+    charge = ifelse(charge == "positive", "(+)", "(-)"),
+    phase = ifelse(phase == "e", "Exponential", "Stationary")
+  )
+
+# get evo values
+evo.pa <- comp.df %>%
+  filter(!grepl("R0", clean)) %>%
+  group_by(clean, phase, compound, charge) %>%
+  summarise(evompa = mean(n_peak_area)) %>%
+  ungroup()
+
+# get ancestral values
+anc.pa <- comp.df %>%
+  filter(grepl("R0", clean)) %>%
+  group_by(phase, compound, charge) %>%
+  summarise(ancmpa = mean(n_peak_area)) %>%
+  ungroup()
+
+# combine and calc changes
+fc.df <-
+  left_join(evo.pa, anc.pa, by = c("phase", "compound", "charge")) %>%
+  mutate(l2rat = log2(evompa / ancmpa))
+
+# get median order for ex phase
+med.order <- fc.df %>%
+  filter(phase == "Exponential") %>%
+  group_by(compound) %>%
+  summarise(med = median(l2rat)) %>%
+  ungroup() %>%
+  arrange(med) %>%
+  pull(compound)
+
+fc.df$compound <- factor(fc.df$compound, levels = med.order)
+```
+
+```{r fig.width = 6, fig.height = 5}
+# plot it
+carb.fc <- fc.df %>% 
+  filter(compound %in% carbon)
+```
+
+Are changes in malate and AKG related to changes in one of the NAD compounds?
+```{r}
+cl <- list(
+  c("Malate", "NAD+"),
+  c("Malate", "NADH"),
+  c("a-ketoglutarate", "NAD+"),
+  c("a-ketoglutarate", "NADH")
+)
+
+dot.list <- lapply(cl, function(x) {
+  fc.df %>%
+    filter(compound %in% x &
+             phase == "Exponential" & charge == "(-)") %>%
+    select(charge, clean, compound, l2rat) %>%
+    pivot_wider(names_from = compound, values_from = l2rat) %>%
+    ggplot(., aes(!!sym(x[1]),!!sym(x[2]))) +
+    geom_abline(aes(slope = 1, intercept = 0), linetype = 5) +
+    geom_point(alpha = .5) +
+    stat_cor(
+      size = 3.5,
+      aes(label = ..r.label..),
+      show.legend = FALSE,
+      label.y.npc = .05,
+      label.x.npc = .45
+    ) +
+    theme_bw() +
+    theme(
+      text = element_text(size = 12),
+      panel.grid.major.x = element_blank(),
+      panel.grid = element_blank()
+    )
+})
+
+dot.list
+```
+
+
+### Final figure
+
+```{r}
+ff <- wrap_plots(dot.list, ncol = 2)
+
+ff
+```
+
+```{r}
+ggsave(ff, filename = "../../figures/carbon_supp2.pdf", width = 6.51, height = 1.8)
+```
+

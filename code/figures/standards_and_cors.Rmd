@@ -1,0 +1,324 @@
+---
+title: "Standards and correlations"
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+author: "John Favate"
+date: "`r Sys.time()`"
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 1500px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+```{r}
+# Prevent printing of warnings and such in the HTML
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, fig.align = "center")
+```
+
+```{r}
+library(tidyverse)
+library(patchwork)
+library(scales)
+library(ggpubr)
+```
+
+```{r}
+df <- read_csv("../../data_frames/targeted_with_imps.csv")
+
+# the untargeted data
+untarg <- read_csv("../../data_frames/untargeted_data.csv")
+```
+
+This is the order I want the samples in, namely grouped by growth phase and replicates next to each other.
+```{r}
+sample.order <- names(df)[!(names(df) %in% c("compound", "charge", "is_standard"))] %>% 
+  as_tibble() %>% 
+  separate(value, into = c("line", "phase", "repl"), sep = "_") %>% 
+  arrange(phase, line, repl) %>% 
+  unite("sample", c(line, phase, repl)) %>% 
+  pull(sample)
+```
+
+df for the labels
+```{r}
+lab.df <- data.frame(
+  charge = "negative",
+  x = c(16e-8, 11e-8, 11e-8),
+  y = c(135, 115, 95),
+  colz = c("Exponential", "Stationary", "Standards"),
+  labz = c("Exponential", "Stationary", "Standards")
+)
+```
+
+```{r}
+dist.labels <- c("FALSE" = "metabolites", "TRUE" = "standards", "positive" = "positive", "negative" = "negative")
+
+p.dists <- df %>% 
+  select(-peak_area) %>% 
+  pivot_longer(cols = where(is.numeric)) %>% 
+  mutate(color = ifelse(is_standard == TRUE, "Standards",
+                        ifelse(phase == "e", "Exponential", "Stationary")),
+         color = factor(color, levels = c("Exponential", "Stationary", "Standards"))) %>% 
+  ggplot(., aes(value, color = color))+
+  facet_wrap(~ charge, scales = "free", labeller = as_labeller(dist.labels), ncol = 2)+
+  geom_freqpoly(bins = 100)+
+  scale_x_log10(labels = trans_format("log10", math_format(10^.x)))+
+  labs(x = "Normalized peak area",
+       y = "Count")+
+  scale_color_manual(values = c("#B2DF8A", "#33A02C", "black"), name = NULL, guide = "none")+
+  theme_bw()+
+  theme(text = element_text(size = 12),
+        panel.grid = element_blank(),
+        legend.background = element_blank())+
+  geom_text(inherit.aes = FALSE, data = lab.df, aes(x, y, color = colz, label = labz))
+
+p.dists
+```
+
+### Correlations
+
+Sample to sample correlations, except split by who being compared to who (i.e. anc to evo, ex to st, etc). What's compared is glucose_negative between samples, meaning compound+charge are the variables here
+```{r}
+cor.input <- df %>%
+  filter(is_standard == FALSE) %>%
+  unite("cc", charge, compound, sep = "_") %>%
+  unite("sample", line, phase, repl, sep = "_") %>%
+  select(cc, sample, n_peak_area) %>%
+  mutate(n_peak_area = log10(n_peak_area)) %>%
+  pivot_wider(names_from = sample, values_from = n_peak_area) %>%
+  column_to_rownames("cc")
+
+cor.res <- cor(cor.input)
+
+# remove redundancy
+cor.res[lower.tri(cor.res)] <- NA
+
+# reshape to a tidy data frame with complete info on line, phase, repl, etc
+cor.df <- as_tibble(cor.res, rownames = "samp1") %>%
+  pivot_longer(where(is.numeric),
+               names_to = "samp2",
+               values_to = "R") %>%
+  filter(samp1 != samp2 & !is.na(R)) %>%
+  separate(samp1,
+           into = c("line1", "phase1", "repl1"),
+           sep = "_") %>%
+  separate(samp2,
+           into = c("line2", "phase2", "repl2"),
+           sep = "_")
+
+# this uses this list of strings which are eventually interpreted
+# to create a list of sets of cors that are eventually joined
+filter.vecs <- list(
+  "Pair-\nwise" = "!is.na(R)",
+  "Repli-\ncates" = "line1 == line2 & phase1 == phase2",
+  "Intra-\nphase" = "phase1 == phase2",
+  "Inter-\nphase" = "line1 == line2 & phase1 != phase2"
+)
+
+# lapply over this list to group the different kinds of correlations
+marked.cors <- lapply(filter.vecs, function(y) {
+  cor.df %>%
+    filter(eval(parse(text = y)))
+}) %>%
+  bind_rows(.id = "type")
+
+# reduce it so the df is smaller for saving as an rds
+pa.df <- marked.cors %>% 
+  select(type, R) %>% 
+  mutate(type = factor(type, names(filter.vecs)))
+```
+
+Plot it.
+```{r}
+comps <- list(c("Intra-\nphase", "Inter-\nphase"))
+
+p.cors <- pa.df %>%
+  ggplot(., aes(type, R)) +
+  geom_boxplot(outlier.size = 1, color = "black") +
+  theme_bw() +
+  theme(
+    text = element_text(size = 13),
+    legend.position = c(.85, .13),
+    legend.background = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  labs(x = NULL) +
+  scale_y_continuous(limits = c(.4, 1.1)) +
+  stat_compare_means(
+    comparisons = comps,
+    vjust = -.5,
+    method.args = list(alternative = "greater")
+  )
+
+p.cors
+```
+
+Sample to sample correlations, except split by who being compared to who (i.e. anc to evo, ex to st, etc). What's compared is glucose_negative between samples, meaning compound+charge are the variables here. This time, with means. 
+```{r}
+cor.input2 <- df %>%
+  filter(is_standard == FALSE) %>%
+  group_by(charge, line, phase, compound) %>%
+  summarise(mean_pa = mean(n_peak_area)) %>%
+  ungroup() %>%
+  unite("cc", charge, compound, sep = "_") %>%
+  unite("sample", line, phase, sep = "_") %>%
+  select(cc, sample, mean_pa) %>%
+  mutate(mean_pa = log10(mean_pa)) %>%
+  pivot_wider(names_from = sample, values_from = mean_pa) %>%
+  column_to_rownames("cc")
+
+cor.res2 <- cor(cor.input2)
+
+# remove redundancy
+cor.res2[lower.tri(cor.res2)] <- NA
+
+# reshape to a tidy data frame with complete info on line, phase, repl, etc
+cor.df2 <- as_tibble(cor.res2, rownames = "samp1") %>%
+  pivot_longer(where(is.numeric),
+               names_to = "samp2",
+               values_to = "R") %>%
+  filter(samp1 != samp2 & !is.na(R)) %>%
+  separate(samp1,
+           into = c("line1", "phase1"),
+           sep = "_") %>%
+  separate(samp2,
+           into = c("line2", "phase2"),
+           sep = "_")
+
+# this uses this list of strings which are eventually interpreted
+# to create a list of sets of cors that are eventually joined
+filter.vecs <- list(
+  "Pair-\nwise" = "!is.na(R)",
+  "Intra-\nphase" = "phase1 == phase2",
+  "Inter-\nphase" = "line1 == line2 & phase1 != phase2"
+)
+
+# lapply over this list to group the different kinds of correlations
+marked.cors2 <- lapply(filter.vecs, function(y) {
+  cor.df2 %>%
+    filter(eval(parse(text = y)))
+}) %>%
+  bind_rows(.id = "type")
+
+pb.df <- marked.cors2 %>%
+  select(type, R) %>% 
+  mutate(type = factor(type, names(filter.vecs)))
+```
+
+Plot it.
+```{r}
+p.cors2 <- pb.df %>%
+  ggplot(., aes(type, R)) +
+  geom_boxplot(outlier.size = 1, color = "black") +
+  theme_bw() +
+  theme(
+    text = element_text(size = 13),
+    legend.position = c(.85, .13),
+    legend.background = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  labs(x = NULL) +
+  stat_compare_means(comparisons = comps,
+                     vjust = -.5,
+                     method.args = list(alternative = "greater")) +
+  scale_y_continuous(limits = c(.4, 1.1))
+
+p.cors2
+```
+
+### Comparison of values across ionization modes
+
+get compounds that are in both +/- mode
+```{r}
+in.both <- df %>% 
+  select(charge, compound) %>% 
+  unique() %>% 
+  count(compound) %>% 
+  filter(n == 2) %>% 
+  pull(compound)
+```
+
+Mean peak areas for the compounds
+```{r}
+mean.df <- df %>% 
+  filter(is_standard == FALSE & compound %in% in.both) %>% 
+  select(charge, line, repl, compound, n_peak_area) %>% 
+  group_by(charge, compound, line) %>% 
+  summarise(l10mpa = log10(mean(n_peak_area))) %>% 
+  ungroup() %>% 
+  pivot_wider(names_from = charge, values_from = l10mpa)
+
+mean.df
+```
+
+They're definitely not 1:1 but they sometimes agree, sometimes they don't though. Acetyl-methionine doesn't agree across modes. Or cytosine.
+```{r fig.width = 6.5, fig.height = 7}
+mean.df %>% 
+  ggplot(., aes(positive, negative))+
+  geom_abline(aes(slope = 1, intercept = 0))+
+  geom_point(size = 1)+
+  facet_wrap(~line, scales = "free")+
+  ggpubr::stat_cor(size = 3)+
+  theme_bw()
+```
+
+```{r}
+charge.cors <- mean.df %>%
+  split(.$line) %>%
+  map(function(x) {
+    tmp <- x %>%
+      select(positive, negative) %>%
+      cor() %>%
+      min(na.rm = TRUE)
+    
+    data.frame(R = tmp)
+  }) %>%
+  bind_rows(.id = "compound")
+
+charge.cors
+```
+
+plot it
+```{r}
+p.charge.r <- charge.cors %>% 
+  ggplot(., aes(x = "", R))+
+  geom_boxplot(outlier.color = NA)+
+  geom_jitter(height = 0, width = .2, size = 1)+
+  theme_bw()+
+  theme(text = element_text(size = 13),
+        panel.grid = element_blank(),
+        axis.ticks.x = element_blank())+
+  labs(x = NULL,
+       y = "R of ion modes")
+
+p.charge.r
+```
+
+
+```{r fig.width = 6.51, fig.height = 5}
+top <- p.dists
+
+bottom <- (p.cors | p.cors2 | p.charge.r) + plot_layout(widths = c(.5, .4, .1))
+
+ff <- (top / bottom) + plot_annotation(tag_levels = "A")
+
+ff
+```
+
+```{r}
+ggsave(plot = ff, filename = "../../figures/standards_and_cors.pdf", width = 6.51, height = 5)
+```
+
+### Untargeted data
+
+How much stuff is in the untargeted data? Depends how you count, i.e. does it have a name, formula, MW, RT, all of them, some of them, etc.
+```{r}
+untarg
+```
+

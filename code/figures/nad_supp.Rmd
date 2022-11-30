@@ -1,0 +1,265 @@
+---
+title: "NAD supplement"
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+author: "John Favate"
+date: "`r Sys.time()`"
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 1500px;
+  margin-left: auto; 
+  margin-right: auto;
+}
+</style>
+
+```{r}
+# Prevent printing of warnings and such in the HTML
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, fig.align = "center")
+```
+
+```{r}
+library(tidyverse)
+library(ggpubr)
+library(patchwork)
+library(scales)
+```
+
+Load some functions required for making graphs for this figure
+```{r}
+source("./figure_funcs.R")
+```
+
+```{r}
+df <- read_csv("../../data_frames/targeted_with_imps.csv") %>% 
+  filter(is_standard == FALSE) %>% 
+  unite("cc", compound, charge, sep = " ", remove = FALSE) %>% 
+  unite("ccp", compound, charge, phase, sep = " ", remove = FALSE)
+
+mut.lines <- c("A-1", "A-2", "A-3", "A-4", "A+3", "A+6")
+
+clean.names <- data.frame(line = unique(df$line)) %>%
+  mutate(clean = case_when(
+    grepl("ap", line) ~ str_replace(line, "ap", "A+"),
+    grepl("am", line) ~ str_replace(line, "am", "A-"),
+    grepl("rel", line) ~ str_replace(line, "rel60", "R0")
+  ))
+
+# combine them and change the one compounds name so it matches the name on fig1
+df <- left_join(df, clean.names) %>% 
+  mutate(is_mutator = clean %in% mut.lines,
+         compound = ifelse(compound == "Nicotinamide ribotide", "Nicotinamide\nmononucleotide", compound))
+```
+
+### dotplots
+
+A function for graphing. This function also exists in the function file that was loaded, but it needed to be modified to produce a guide for this specific figure, the rest of them may not need that.
+```{r}
+dotplot_graph <- function(x,n) {
+  # get the comps and clean it up
+  comp.df <- df %>% 
+    filter(compound %in% x) %>% 
+    mutate(charge = ifelse(charge == "positive", "(+)", "(-)"),
+           phase = ifelse(phase == "e", "Exponential", "Stationary"))
+  
+  # get evo values
+  evo.pa <- comp.df %>%
+    filter(!grepl("R0", clean)) %>%
+    group_by(clean, phase, compound, charge) %>%
+    summarise(evompa = mean(n_peak_area)) %>%
+    ungroup()
+  
+  # get ancestral values
+  anc.pa <- comp.df %>%
+    filter(grepl("R0", clean)) %>%
+    group_by(phase, compound, charge) %>%
+    summarise(ancmpa = mean(n_peak_area)) %>%
+    ungroup()
+  
+  # combine and calc changes
+  fc.df <-
+    left_join(evo.pa, anc.pa, by = c("phase", "compound", "charge")) %>%
+    mutate(l2rat = log2(evompa / ancmpa),
+           compound = factor(compound, rev(x)))
+  
+  # plot it
+  p <- fc.df %>%
+    ggplot(., aes(l2rat, compound, color = charge)) +
+    geom_vline(aes(xintercept = 0), linetype = 5)+
+    geom_point(position = position_dodge(width = .9), alpha = .25) +
+    facet_wrap( ~ phase, ncol = n) +
+    theme_bw() +
+    theme(
+      text = element_text(size = 12),
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor = element_blank()
+    ) +
+    labs(x = expression(paste(log[2], "(Evo peak area / Anc peak area)")),
+         y = NULL)+
+    scale_color_manual(values = c("black", "red"), name = "Ionization\nmode")
+  
+  return(p)
+}
+```
+
+
+This is a named list of compounds I want in the plot, the name is arbitrary but describes the pathway
+```{r}
+clist <- list(
+  "NAD" = c(
+    "Aspartate",
+    "NAD+",
+    "NADH",
+    "NADPH",
+    "NADP+",
+    "Nicotinamide\nmononucleotide",
+    "Nicotinate"
+  )
+)
+```
+
+```{r}
+dp.list <- lapply(clist, dotplot_graph, n=2)
+
+dp.list.med <- lapply(clist, dotplot_med_graph)
+
+dp.list
+dp.list.med
+```
+
+This gives the range of changes over both ionization modes.
+```{r}
+lapply(clist, range_func)
+```
+
+### cor between NAD/NADP
+
+Get fold changes
+```{r}
+comp.df <- df %>%
+  filter(compound %in% clist$NAD) %>%
+  mutate(
+    charge = ifelse(charge == "positive", "(+)", "(-)"),
+    phase = ifelse(phase == "e", "Exponential", "Stationary")
+  )
+
+# get evo values
+evo.pa <- comp.df %>%
+  filter(!grepl("R0", clean)) %>%
+  group_by(clean, phase, compound, charge) %>%
+  summarise(evompa = mean(n_peak_area)) %>%
+  ungroup()
+
+# get ancestral values
+anc.pa <- comp.df %>%
+  filter(grepl("R0", clean)) %>%
+  group_by(phase, compound, charge) %>%
+  summarise(ancmpa = mean(n_peak_area)) %>%
+  ungroup()
+
+# combine and calc changes
+fc.df <-
+  left_join(evo.pa, anc.pa, by = c("phase", "compound", "charge")) %>%
+  mutate(l2rat = log2(evompa / ancmpa))
+```
+
+```{r fig.width = 8, fig.height = 8}
+nad.combs <- combn(
+  c("NADH", "NAD+", "NADP+", "NADPH"),
+  2,
+  simplify = FALSE
+)
+
+plist <- lapply(nad.combs, function(x) {
+  fc.df %>%
+    filter(compound %in% x & phase == "Exponential") %>%
+    select(clean, charge, compound, l2rat) %>%
+    pivot_wider(names_from = compound, values_from = l2rat) %>%
+    ggplot(., aes(!!sym(x[1]),!!sym(x[2]), color = charge)) +
+    geom_abline(aes(slope = 1, intercept = 0), linetype = 5) +
+    geom_point(alpha = .5) +
+    stat_cor(size = 3, aes(label = ..r.label..), show.legend = FALSE) +
+    theme_bw() +
+    theme(
+      text = element_text(size = 12),
+      panel.grid.major.x = element_blank(),
+      panel.grid = element_blank()
+    ) +
+    scale_color_manual(values = c("black", "red"), name = "Ionization mode", guide = "none")
+})
+
+nad.cors <- wrap_plots(plist, ncol = 2)
+```
+
+### change across growth phases
+
+```{r}
+xlabs <- c(
+  "GS Ex",
+  "GS St",
+  "GSSG Ex",
+  "GSSG St",
+  "AS Ex",
+  "AS St"
+)
+
+fac.labs <- c("positive" = "Positive mode", "negative" = "Negative mode")
+
+p.boxes <- df %>% 
+  filter(compound %in% c("NAD+", "NADH", "NADP+", "NADPH")) %>% 
+  group_by(charge, clean, phase, compound) %>% 
+  summarise(mpa = mean((n_peak_area))) %>% 
+  ungroup() %>% 
+  mutate(phase = ifelse(phase == "e", "Ex", "St"),
+         paired = paste(clean, compound),
+         colz = ifelse(grepl("R0", clean), "anc", "evo")) %>% 
+  arrange(desc(colz)) %>% 
+  ggplot(., aes(interaction(phase, compound), mpa))+
+  geom_boxplot(color = "grey70", outlier.size = NULL)+
+  geom_point(aes(color = colz), size = .5)+
+  geom_line(aes(group = interaction(paired, compound), color = colz), alpha = .5)+
+  facet_wrap(~charge, labeller = as_labeller(fac.labs), ncol = 1)+
+  theme_bw()+
+  theme(panel.grid = element_blank(),
+        text = element_text(size = 13),
+        legend.position = c(.8, .93),
+        legend.background = element_blank(),
+        axis.text.x = element_text(angle = 30, hjust = 1))+
+  scale_x_discrete()+
+  labs(x = NULL,
+       y = "Normalized peak area")+
+  scale_color_manual(values = c("chocolate1", "cadetblue"), name = NULL, labels = c("Ancestor", "Evolved"))+
+  scale_y_log10(labels = trans_format("log10", math_format(10^.x)))
+
+p.boxes
+```
+
+### Final figure
+
+This is a pretty hacky use of various patchwork functions but without this, the long text labels of panel A force the y axis labels for panel B to be extremely far from the graph.
+```{r width = 6.5, height = 7}
+top <- dp.list$NAD
+
+bottom <- nad.cors | p.boxes
+
+# ff <- (top / wrap_elements(full = bottom)) + plot_layout(heights = c(.3, .7)) + plot_annotation(tag_levels = "A")
+
+ff <- (top / bottom) + plot_layout(heights = c(.3, .7)) + plot_annotation(tag_levels = "A")
+```
+
+```{r}
+bottom <- cowplot::plot_grid(nad.cors, p.boxes, labels = c("B", "C"), label_fontface = "plain")
+
+ff <- cowplot::plot_grid(dp.list$NAD, bottom, ncol = 1, labels = c("A", "", ""), rel_heights = c(.35, .65), label_fontface = "plain")
+
+ff
+```
+
+
+```{r}
+ggsave(ff, filename = "../../figures/nad_supp.pdf", width = 6.51, height = 7)
+```
+

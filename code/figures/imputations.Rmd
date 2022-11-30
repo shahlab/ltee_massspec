@@ -1,0 +1,130 @@
+---
+title: "Imputations"
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+author: "John Favate"
+date: "`r Sys.time()`"
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 1500px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+```{r}
+# Prevent printing of warnings and such in the HTML
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, fig.align = "center")
+```
+
+```{r}
+library(tidyverse)
+library(scales)
+
+df <- read_csv("../../data_frames/targeted_with_imps.csv") %>% 
+  filter(is_standard == FALSE)
+
+# names too long
+df[df$compound == "5-Aminoimidazole-4-carboxamide ribonucleoside (AICAr)",]$compound <- "AICA ribonucleoside"
+
+df[df$compound == "5-Aminoimidazole-4-carboxamide ribonucleotide",]$compound <- "AICA ribonucleotide"
+
+# these are compounds that had some amount of imputation
+impd.comps <- df %>% 
+  filter(was_imputed == TRUE) %>% 
+  pull(compound) %>% 
+  unique()
+```
+
+A function that inserts a line break if the names too long
+```{r}
+test.names <- c("short", "reaaaaaaaallllllllllyyyyyyyyyyy_looooonnngggggg_nnaaammeeeee")
+
+line_breaker <- function(x){
+  if (nchar(x) > 18){
+    tmp <- paste0(
+      str_sub(x, start = 1, end = nchar(x)/2),
+      "-\n",
+      str_sub(x, start = (nchar(x)/2)+1, end = -1)
+    )
+  } else {
+    tmp <- x
+  }
+  
+  return(tmp)
+}
+
+lapply(test.names, line_breaker)
+```
+
+Shows that the imputations fall in line with expectations, i.e. that they're all small.
+```{r fig.width = 6.51, fig.height = 7}
+p <- df %>% 
+  filter(compound %in% impd.comps) %>% 
+  rowwise() %>% 
+  mutate(compound = line_breaker(compound)) %>% 
+  ungroup() %>% 
+  mutate(charge = ifelse(charge == "positive", "(+)", "(-)"),
+         phase = ifelse(phase == "e", "Ex", "St"),
+         was_imputed = ifelse(was_imputed == 1, "Imputed", "Not imputed")) %>% 
+  unite("sample", charge, phase, sep = "") %>% 
+  select(compound, sample, n_peak_area, was_imputed) %>% 
+  ggplot(., aes(sample, n_peak_area, color = was_imputed))+
+  geom_jitter(height = 0, width = .2, size = .1)+
+  facet_wrap(~ compound, scales = "free_x", ncol = 6)+
+  scale_color_manual(values = c("blue", "black"), name = NULL)+
+  scale_y_log10(labels = trans_format("log10", math_format(10^.x)))+
+  theme_bw()+
+  theme(panel.grid = element_blank(),
+        strip.text = element_text(size = 7),
+        text = element_text(size = 9),
+        legend.position = "bottom")+
+  labs(x = NULL,
+       y = "Normalized peak area")+
+  guides(colour = guide_legend(override.aes = list(size=2)))
+
+p 
+```
+
+For the text, how many compounds are there?
+```{r}
+tc <- length(unique(df$compound))
+tc
+```
+
+How many detected in all samples, i.e. how many don't have any imputations on them?
+```{r}
+complete.comps <- df %>% 
+  split(.$charge) %>% 
+  map(function(x){
+    x %>% 
+      group_by(compound) %>% 
+      count(was_imputed) %>% 
+      pivot_wider(names_from = was_imputed, values_from = n) %>% 
+      filter(is.na(`TRUE`)) %>% 
+      pull(compound)
+  }) %>% 
+  unlist() %>% 
+  unique() %>% 
+  length()
+
+complete.comps
+```
+
+The difference
+```{r}
+tc - complete.comps
+```
+
+```{r}
+ggsave(plot = p, filename = "../../figures/imputations.pdf", width = 6.51, height = 6.2)
+```
+
+```{r}
+sessionInfo()
+```
+

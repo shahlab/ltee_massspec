@@ -1,0 +1,281 @@
+---
+title: "Data comparisons"
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+author: "John Favate"
+date: "`r Sys.time()`"
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 1500px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+```{r}
+# Prevent printing of warnings and such in the HTML
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, fig.align = "center")
+```
+
+```{r}
+library(tidyverse)
+library(patchwork)
+library(scales)
+library(parallel)
+library(broom)
+library(ggpubr)
+library(corrr)
+library(ggrepel)
+
+df <- read_csv("../../data_frames/targeted_with_imps.csv") %>% 
+  filter(is_standard == FALSE)
+
+mut.lines <- c("A-1", "A-2", "A-3", "A-4", "A+3", "A+6")
+
+clean.names <- data.frame(line = unique(df$line)) %>%
+  mutate(clean = case_when(
+    grepl("ap", line) ~ str_replace(line, "ap", "A+"),
+    grepl("am", line) ~ str_replace(line, "am", "A-"),
+    grepl("rel", line) ~ str_replace(line, "rel60", "R0")
+  ))
+
+df <- left_join(df, clean.names) %>% 
+  mutate(is_mutator = clean %in% mut.lines)
+```
+
+### Growth phase specific PCA
+
+Shape the input data as a list, one per growth phase
+```{r}
+pca.input.list <- df %>%
+  select(-is_standard, -was_imputed, -peak_area, -is_mutator) %>%
+  mutate(n_peak_area = log10(n_peak_area)) %>%
+  unite("cc", compound, charge, sep = "_") %>%
+  group_by(line, phase, cc) %>% 
+  summarise(mpa = mean(n_peak_area)) %>% 
+  ungroup() %>% 
+  mutate(phase = ifelse(phase == "e", "Exponential", "Stationary")) %>% 
+  split(.$phase) %>% 
+  map(function(x){
+    x %>% 
+      select(-phase) %>% 
+      pivot_wider(names_from = cc, values_from = mpa) %>% 
+      left_join(clean.names) %>% 
+      column_to_rownames("clean") %>% 
+      select(-line)
+  })
+```
+
+Run the PCAs
+```{r}
+pca.res.list <- lapply(pca.input.list, prcomp, scale = TRUE)
+```
+
+Code to make the graphs
+```{r}
+p.list <-
+  lapply(setNames(names(pca.res.list), names(pca.res.list)), function(x) {
+    # the results
+    res <- pca.res.list[[x]]
+    
+    # the input
+    inp <- pca.input.list[[x]]
+    
+    # var explained
+    var.explained <- res %>%
+      tidy(matrix = "eigenvalues")
+    
+    # create new axis labels
+    pc1.explain <-
+      paste0("PC1 (", 100 * signif(var.explained[var.explained$PC == 1, ]$percent, 4), "%)")
+    
+    pc2.explain <-
+      paste0("PC2 (", 100 * signif(var.explained[var.explained$PC == 2, ]$percent, 4), "%)")
+    
+    # the plot df
+    pdf <- res %>%
+      augment(inp) %>%
+      select(`.rownames`, starts_with(".fitted")) %>%
+      rename("line" = ".rownames") %>%
+      mutate(phase = x,
+             is_mutator = line %in% mut.lines)
+    
+    # color
+    if (x == "Exponential") {
+      colorz <- "royalblue"
+    } else {
+      colorz <- "goldenrod"
+    }
+    
+    # the plot
+    ggplot(pdf, aes(`.fittedPC1`,
+                    `.fittedPC2`,
+                    label = line,
+                    color = is_mutator)) +
+      geom_point(size = 1)+
+      geom_text_repel(
+        seed = 1,
+        min.segment.length = 1e-12,
+        segment.alpha = .5,
+        max.overlaps = Inf,
+        show.legend = FALSE,
+        size = 2.5,
+      ) +
+      theme_bw() +
+      theme(
+        text = element_text(size = 12),
+        panel.grid = element_blank()
+      ) +
+      labs(x = pc1.explain,
+           y = pc2.explain) +
+      facet_wrap( ~ phase)+
+      scale_color_manual(values = c("steelblue4", "orange4"),
+                         name = NULL,
+                         labels = c("Non-mutator",
+                                    "Mutator"))
+  })
+```
+
+```{r fig.width = 5, fig.height = 2.75}
+pcas <- (p.list[[1]] | p.list[[2]]) + plot_layout(guides = "collect") & theme(legend.position = "bottom",
+        legend.margin=margin(0,0,0,0),
+        legend.box.margin=margin(-10,-10,-10,-10))
+
+pcas
+```
+
+Save these results for use in another figure
+```{r}
+write_rds(pca.input.list, "../../rds_files/fig4_pca_input_list.rds")
+write_rds(pca.res.list, "../../rds_files/fig4_pca_res_list.rds")
+```
+
+### Extent of parallelism in fold-changes to the ancestor
+
+The code for this is in a separate Rscript that calculates both the actual and randomized set of correlations. That Rscript is at `../analysis/randomizations_for_fig2.R`. Run that separately and it will deposit a file `../../data_frames/randomizations_for_fig2.csv.gz` which is loaded here. It's quite large so it takes some time. This may not work right out of the box if your OS doesn't handle gzip compression well.
+
+Load the randomizations
+```{r}
+combo.cors <- read_csv("../../data_frames/randomizations_for_fig2.csv.gz")
+```
+
+KS tests to test for differences
+```{r}
+ks.res <- combo.cors %>%
+  split(.$phase) %>%
+  map(function(x) {
+    obs <- x[x$iter == "Observed", ]$R
+    
+    exp <- x[x$iter == "Expected", ]$R
+    
+    ks.test(obs, exp) %>%
+      tidy() %>%
+      mutate(cuts = cut(
+        p.value,
+        c(1, .05, .01, .001, .0001,-Inf),
+        labels = c("****", "***", "**", "*", "NS")
+      ))
+  }) %>% 
+  bind_rows(.id = "phase")
+
+ks.res
+```
+
+Also test the difference between Obs Ex and Obs St
+```{r}
+ks.test(
+  combo.cors[combo.cors$phase == "Ex" & combo.cors$iter == "Observed",]$R,
+  combo.cors[combo.cors$phase == "St" & combo.cors$iter == "Observed",]$R
+  )
+```
+
+```{r}
+range(combo.cors$points, na.rm = TRUE)
+```
+
+This takes really long to draw because there's so many points in the randomizations boxes.
+```{r fig.width = 2, fig.height = 3}
+p.cors <- combo.cors %>%
+  ggplot(.) +
+  geom_jitter(aes(phase, points, color = iter), position=position_jitterdodge(jitter.height = 0), size = .2)+
+  geom_boxplot(fill = NA, aes(phase, R, color = iter), outlier.size = .2)+
+  theme_bw()+
+  theme(text = element_text(size = 12),
+        panel.grid = element_blank())+
+  labs(x = NULL,
+       y = expression(paste(rho, " of ", log[2], "(FC)", sep = "")))+
+  scale_color_manual(values = c("grey60", "black"), name = NULL, guide = "none")+
+  geom_text(inherit.aes = FALSE, data = ks.res, aes(phase, .88, label = cuts))+
+  annotate("text", x = 2, y = 1.05, label = "Observed", size = 2.5)+
+  annotate("text", x = 1, y = 1.05, label = "Expected", color = "grey60", size = 2.5)
+```
+
+### Cor network plot
+
+Need fold changes
+```{r}
+# these are the ancestral mean peak areas
+anc.vals <- df %>% 
+  mutate(age = ifelse(grepl("R0", clean), "Ancestor", "Evolved")) %>% 
+  filter(age == "Ancestor") %>% 
+  group_by(charge, phase, compound) %>% 
+  summarise(anc_mean = mean(n_peak_area)) %>% 
+  ungroup()
+
+# these are the evo mean peak areas
+evo.vals <- df %>% 
+  mutate(age = ifelse(grepl("R0", clean), "Ancestor", "Evolved")) %>% 
+  filter(age != "Ancestor") %>% 
+  group_by(charge, phase, compound, clean) %>% 
+  summarise(evo_mean = mean(n_peak_area)) %>% 
+  ungroup()
+
+# combine them and calculate fold changes
+fc.df <- left_join(evo.vals, anc.vals) %>% 
+  mutate(l2ratio = log2(evo_mean / anc_mean)) %>% 
+  select(charge, phase, compound, clean, l2ratio)
+```
+
+
+Instead, one of these cor network plots.
+```{r fig.width = 4, fig.height = 4}
+cor.net.list <- fc.df %>%
+  split(.$phase) %>%
+  map(function(x) {
+    x %>%
+      select(-phase) %>%
+      unite("comp", charge, compound, sep = "_") %>%
+      pivot_wider(names_from = clean, values_from = l2ratio) %>%
+      column_to_rownames("comp") %>%
+      correlate(method = "spearman") %>%
+      network_plot(
+        min_cor = 0,
+        colors = viridis::plasma(64),
+        legend = "range",
+        repel = FALSE
+      )
+  })
+  
+cor.net.list
+```
+
+### Final figure
+
+```{r fig.width = 6.51, fig.height = 5}
+top <- (pcas | p.cors) + plot_layout(widths = c(.35, .35, .3))
+
+bottom <- cor.net.list$e | cor.net.list$s
+
+ff <- (top / bottom) + plot_annotation(tag_levels = "A") + plot_layout(heights = c(.35, .65))
+
+ff
+```
+
+Save it
+```{r}
+ggsave(plot = ff, filename = "../../figures/data_comparisons.pdf", width = 6.51, height = 5)
+```
