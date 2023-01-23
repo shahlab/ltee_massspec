@@ -1,0 +1,314 @@
+---
+title: "Clustering"
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+author: "John Favate"
+date: "`r Sys.time()`"
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 1500px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+```{r}
+# Prevent printing of warnings and such in the HTML
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, fig.align = "center")
+```
+
+Load packages
+```{r}
+library(tidyverse)
+library(sinib)
+library(scales)
+library(broom)
+library(patchwork)
+```
+
+Read in the data, converting the names to cleaner forms and marking muators in the process.
+```{r}
+df <- read_csv("../../data_frames/targeted_with_imps.csv") %>% 
+  filter(is_standard == FALSE)
+
+clean.names <- data.frame(line = unique(df$line)) %>%
+  mutate(clean = case_when(
+    grepl("ap", line) ~ str_replace(line, "ap", "A+"),
+    grepl("am", line) ~ str_replace(line, "am", "A-"),
+    grepl("rel", line) ~ str_replace(line, "rel60", "R0")
+  ))
+
+mut.lines <- c("A-1", "A-2", "A-3", "A-4", "A+3", "A+6")
+
+df <- left_join(df, clean.names)
+```
+
+Get fold changes from ancestor to each evolved line
+```{r}
+# these are the ancestral mean peak areas
+anc.vals <- df %>% 
+  mutate(age = ifelse(grepl("R0", clean), "Ancestor", "Evolved")) %>% 
+  filter(age == "Ancestor") %>% 
+  group_by(charge, phase, compound) %>% 
+  summarise(anc_mean = mean(n_peak_area)) %>% 
+  ungroup()
+
+# these are the evo mean peak areas
+evo.vals <- df %>% 
+  mutate(age = ifelse(grepl("R0", clean), "Ancestor", "Evolved")) %>% 
+  filter(age != "Ancestor") %>% 
+  group_by(charge, phase, compound, clean) %>% 
+  summarise(evo_mean = mean(n_peak_area)) %>% 
+  ungroup()
+
+# combine them and calculate fold changes
+fc.df <- left_join(evo.vals, anc.vals) %>% 
+  mutate(l2ratio = log2(evo_mean / anc_mean),
+         sig = abs(l2ratio) >= 1) %>% 
+  select(charge, phase, compound, clean, l2ratio, sig) %>% 
+  unite("cc", charge, compound)
+  
+
+fc.df
+```
+
+fc distributions
+```{r}
+ggplot(fc.df, aes(l2ratio))+
+  geom_histogram(binwidth = .5, boundary = 0)+
+  geom_vline(aes(xintercept = -1))+
+  geom_vline(aes(xintercept = 1))+
+  scale_x_continuous(breaks = seq(-10,10,1))+
+  facet_wrap(~phase, ncol = 1)
+```
+
+how many metabolite features (charge + compound) are there?
+```{r}
+total.metabs <- length(unique(fc.df$cc))
+
+total.metabs
+```
+
+### Theoretical distributions
+
+`prob.sig` is the line/phase specific probability of being a metab with abs(l2fc) >= 1 given a total number of features (charge + compound).
+```{r}
+sig.probs <- fc.df %>% 
+  mutate(direc = ifelse(l2ratio > 0, "Up", "Down")) %>% 
+  filter(sig == TRUE) %>% 
+  group_by(clean, phase, direc) %>% 
+  tally() %>% 
+  ungroup() %>% 
+  mutate(prob.sig = n / total.metabs) %>% 
+  group_by()
+```
+
+Get the theoretical distributions and use that to figure out how many features you'd expect to see altered in the same direction (`shared_metabs`) in `n_lines`.
+```{r}
+sinib.probs <- sig.probs %>% 
+  split(list(.$phase, .$direc)) %>% # for each phase and direction
+  map(function(x){
+    # what is the prob of picking a metab that is sig in n lines
+    dsinib(x = 1:12, # chance of getting 1, 2, ... successes, i.e. same metab same direc in n lines
+           size = rep(1, 12), # pick one metab, 12 times, one for each of the 1:12 above
+           prob = x$prob.sig) %>% # probs from the data
+      as_tibble() %>% # convert to df
+      mutate(n_lines = 1:12) # add n lines values to match the probs
+  }) %>% 
+  bind_rows(.id = "sample") %>% 
+  separate(sample, into = c("phase", "direc"), sep = "\\.") %>% 
+  mutate(type = "theoretical") %>% 
+  rename("probs" = "value") %>% 
+  mutate(shared_metabs = floor(total.metabs * probs)) # given these probs, how many metabs should be sig in n lines? 
+
+sinib.probs
+```
+
+Get the actual number distributions my multiplying `n_lines` by the `shared_metabs` in a phase and direction specific manner.
+```{r}
+theory.dist <- sinib.probs %>% 
+  split(list(.$phase, .$direc)) %>% 
+  map(function(x){
+    rep(
+      x$n_lines,
+      x$shared_metabs
+    )
+  })
+
+theory.dist
+```
+
+### Observed
+
+Observed probability of being shared, add a 1-sum here
+```{r}
+obs.probs <- fc.df %>%
+  filter(sig == TRUE) %>%
+  mutate(direc = ifelse(l2ratio > 0, "Up", "Down")) %>%
+  group_by(cc, direc, phase) %>%
+  tally() %>%
+  ungroup() %>% 
+  group_by(direc, phase, n) %>% 
+  tally() %>% 
+  ungroup() %>% 
+  mutate(probs = nn / total.metabs,
+         type = "Observed") %>% 
+  select(direc, phase, n, probs, type) %>% 
+  rename("n_lines" = "n")
+
+obs.probs
+```
+
+```{r}
+# make a matching df of theoretical probs
+th.probs <- sinib.probs %>% 
+  select(phase, direc, n_lines, probs) %>% 
+  mutate(type = "Theoretical")
+
+th.probs
+```
+
+How many features are actually shared? 
+```{r}
+actual.dist <- fc.df %>%
+  filter(sig == TRUE) %>%
+  mutate(direc = ifelse(l2ratio > 0, "Up", "Down")) %>%
+  group_by(cc, direc, phase) %>%
+  tally() %>%
+  ungroup() %>% 
+  split(list(.$phase, .$direc)) %>% 
+  map(function(x){
+    pull(x, n) %>% 
+      sort()
+  })
+
+actual.dist
+```
+
+Run t-test to compare theoretical and observed
+```{r}
+t.res <- sapply(names(theory.dist), function(x) {
+  t.test(theory.dist[[x]],
+         actual.dist[[x]]) %>%
+    tidy()
+}, simplify = FALSE) %>%
+  bind_rows(.id = "sample") %>% 
+  separate(sample, into = c("phase", "direc"), sep = "\\.") %>% 
+  mutate(xpos = 6.5, # these are for positioning them on a graph
+         ypos = 60,
+         p.value = paste("p =", signif(p.value, 1))) %>% 
+  mutate(phase = ifelse(phase == "e", "Exponential", "Stationary"),
+         type = "Observed")
+
+t.res
+```
+
+Make a graph of the probabilities 
+```{r fig.width = 6.51, fig.height = 4}
+pdf <- bind_rows(th.probs, obs.probs) %>%
+  mutate(phase = ifelse(phase == "e", "Exponential", "Stationary"))
+
+p.lines <- pdf %>% 
+  ggplot(., aes(n_lines, probs, color = direc, linetype = type)) +
+  geom_line() +
+  geom_point() +
+  facet_grid(direc ~ phase) +
+  scale_x_continuous(breaks = 0:12) +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        text = element_text(size = 12),
+        legend.position = c(.88, .1),
+        legend.background = element_blank()) +
+  scale_color_manual(
+    values = c("indianred", "steelblue"),
+    name = NULL,
+    guide = "none"
+  ) +
+  labs(x = "Number of evolved lines",
+       y = "Probability") +
+  scale_linetype_discrete(name = NULL) +
+  scale_y_log10(labels = trans_format("log10", math_format(10 ^ .x)))
+
+p.lines
+```
+
+```{r}
+ggsave(plot = p.lines, filename = "../../figures/probs_supp_1.pdf", width = 6.51, height = 4)
+```
+
+### Number of metabs altered
+
+How many metabs did we expect to and actually see altered in the same direction?
+```{r}
+t.metabs <- sinib.probs %>% 
+  select(phase, direc, n_lines, shared_metabs)
+
+o.metabs <- fc.df %>%
+  filter(sig == TRUE) %>%
+  mutate(direc = ifelse(l2ratio > 0, "Up", "Down")) %>%
+  group_by(cc, direc, phase) %>%
+  tally(name = "n_lines") %>%
+  ungroup() %>% 
+  group_by(direc, phase, n_lines) %>% 
+  tally(name = "shared_metabs") %>% 
+  ungroup()
+```
+
+```{r}
+plot.df <- bind_rows("Theoretical" = t.metabs, "Observed" = o.metabs, .id = "type") %>%
+  mutate(phase = ifelse(phase == "e", "Exponential", "Stationary"))
+```
+
+As lines
+```{r}
+p.lines2 <- plot.df %>%
+  ggplot(., aes(
+    factor(n_lines),
+    shared_metabs,
+    group = type,
+    color = direc,
+    linetype = type
+  )) +
+  geom_point()+
+  geom_line()+
+  facet_grid(direc ~ phase) +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank(),
+    text = element_text(size = 12),
+    legend.position = c(.89, .92),
+    legend.background = element_blank()
+  ) +
+  scale_color_manual(
+    values = c("indianred", "steelblue"),
+    name = NULL,
+    guide = "none"
+  ) +
+  scale_linetype_discrete(name = NULL)+
+  labs(x = "Number of evolved lines",
+       y = "Number of shared metabolic features")+
+  geom_text(
+    inherit.aes = FALSE,
+    data = t.res,
+    aes(
+      x = xpos,
+      y = ypos,
+      label = p.value
+    ),
+    show.legend = FALSE
+  )
+
+p.lines2
+```
+
+```{r}
+ggsave(plot = p.lines2, filename = "../../figures/probs_supp_2.pdf", width = 6.51, height = 4)
+```
+
+```{r}
+sessionInfo()
+```
