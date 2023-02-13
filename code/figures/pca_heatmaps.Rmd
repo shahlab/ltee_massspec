@@ -142,7 +142,7 @@ hm.list <- sapply(names(pca.res.list), function(x) {
   
   # the annotation data
   hma.cols <-
-    list("Mutator" = c("Yes" = "orange3", "No" = "steelblue3"))
+    list("Mutator" = c("Yes" = "orange3", "No" = "black"))
   
   hma <-
     HeatmapAnnotation(
@@ -213,7 +213,7 @@ hm.list2 <- sapply(names(pca.res.list), function(x) {
   
   # the annotation data
   hma.cols <-
-    list("Mutator" = c("Yes" = "orange3", "No" = "steelblue3"))
+    list("Mutator" = c("Yes" = "orange3", "No" = "black"))
   
   hma <-
     HeatmapAnnotation(

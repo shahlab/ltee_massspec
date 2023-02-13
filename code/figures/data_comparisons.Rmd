@@ -133,7 +133,7 @@ p.list <-
       labs(x = pc1.explain,
            y = pc2.explain) +
       facet_wrap( ~ phase)+
-      scale_color_manual(values = c("steelblue4", "orange4"),
+      scale_color_manual(values = c("black", "orange3"),
                          name = NULL,
                          labels = c("Non-mutator",
                                     "Mutator"))
@@ -163,16 +163,16 @@ Load the randomizations
 combo.cors <- read_csv("../../data_frames/randomizations_for_fig2.csv.gz")
 ```
 
-KS tests to test for differences
+t tests to test for differences
 ```{r}
-ks.res <- combo.cors %>%
+t.res <- combo.cors %>%
   split(.$phase) %>%
   map(function(x) {
     obs <- x[x$iter == "Observed", ]$R
     
     exp <- x[x$iter == "Expected", ]$R
     
-    ks.test(obs, exp) %>%
+    t.test(obs, exp) %>%
       tidy() %>%
       mutate(cuts = cut(
         p.value,
@@ -182,12 +182,12 @@ ks.res <- combo.cors %>%
   }) %>% 
   bind_rows(.id = "phase")
 
-ks.res
+t.res
 ```
 
-Also test the difference between Obs Ex and Obs St
+Also test the difference between Obs Ex and Obs St, this accompanies the sentence "The correlation of metabolite abundances across evolved lines are more similar in the exponential phase \figref[D]{pcas} than in the stationary phase \figref[E]{pcas} (KS test, $p < 0.001$)." in the paper
 ```{r}
-ks.test(
+t.test(
   combo.cors[combo.cors$phase == "Ex" & combo.cors$iter == "Observed",]$R,
   combo.cors[combo.cors$phase == "St" & combo.cors$iter == "Observed",]$R
   )
@@ -209,7 +209,7 @@ p.cors <- combo.cors %>%
   labs(x = NULL,
        y = expression(paste(rho, " of ", log[2], "(FC)", sep = "")))+
   scale_color_manual(values = c("grey60", "black"), name = NULL, guide = "none")+
-  geom_text(inherit.aes = FALSE, data = ks.res, aes(phase, .88, label = cuts))+
+  geom_text(inherit.aes = FALSE, data = t.res, aes(phase, .88, label = cuts))+
   annotate("text", x = 2, y = 1.05, label = "Observed", size = 2.5)+
   annotate("text", x = 1, y = 1.05, label = "Expected", color = "grey60", size = 2.5)
 ```

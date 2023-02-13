@@ -29,57 +29,64 @@ library(ggpubr)
 ```
 
 ```{r}
-df <- read_csv("../../data_frames/targeted_with_imps.csv")
+df <- read_csv("../../data_frames/targeted_with_imps.csv") %>% 
+  filter(is_standard == FALSE)
 
-# the untargeted data
-untarg <- read_csv("../../data_frames/untargeted_data.csv")
+clean.names <- data.frame(line = unique(df$line)) %>%
+  mutate(clean = case_when(
+    grepl("ap", line) ~ str_replace(line, "ap", "A+"),
+    grepl("am", line) ~ str_replace(line, "am", "A-"),
+    grepl("rel", line) ~ str_replace(line, "rel60", "R0")
+  ))
+
+mut.lines <- c("A-1", "A-2", "A-3", "A-4", "A+3", "A+6")
+
+df <- left_join(df, clean.names)
 ```
 
-This is the order I want the samples in, namely grouped by growth phase and replicates next to each other.
-```{r}
-sample.order <- names(df)[!(names(df) %in% c("compound", "charge", "is_standard"))] %>% 
-  as_tibble() %>% 
-  separate(value, into = c("line", "phase", "repl"), sep = "_") %>% 
-  arrange(phase, line, repl) %>% 
-  unite("sample", c(line, phase, repl)) %>% 
-  pull(sample)
-```
+### Distribution of normalized peak areas
 
-df for the labels
-```{r}
-lab.df <- data.frame(
-  charge = "negative",
-  x = c(16e-8, 11e-8, 11e-8),
-  y = c(135, 115, 95),
-  colz = c("Exponential", "Stationary", "Standards"),
-  labz = c("Exponential", "Stationary", "Standards")
+```{r fig.width = 6.51, fig.height = 5}
+ann.df <- data.frame(
+  phase = rep("Exponential", 2),
+  x = c(1.2, 2.4),
+  y = rep(5e-8, 2),
+  label = c("R1", "R2")
 )
-```
 
-```{r}
-dist.labels <- c("FALSE" = "metabolites", "TRUE" = "standards", "positive" = "positive", "negative" = "negative")
-
-p.dists <- df %>% 
-  select(-peak_area) %>% 
-  pivot_longer(cols = where(is.numeric)) %>% 
-  mutate(color = ifelse(is_standard == TRUE, "Standards",
-                        ifelse(phase == "e", "Exponential", "Stationary")),
-         color = factor(color, levels = c("Exponential", "Stationary", "Standards"))) %>% 
-  ggplot(., aes(value, color = color))+
-  facet_wrap(~ charge, scales = "free", labeller = as_labeller(dist.labels), ncol = 2)+
-  geom_freqpoly(bins = 100)+
-  scale_x_log10(labels = trans_format("log10", math_format(10^.x)))+
-  labs(x = "Normalized peak area",
-       y = "Count")+
-  scale_color_manual(values = c("#B2DF8A", "#33A02C", "black"), name = NULL, guide = "none")+
-  theme_bw()+
-  theme(text = element_text(size = 12),
-        panel.grid = element_blank(),
-        legend.background = element_blank())+
-  geom_text(inherit.aes = FALSE, data = lab.df, aes(x, y, color = colz, label = labz))
+p.dists <- df %>%
+  mutate(
+    charge = ifelse(charge == "positive", "(+)", "(-)"),
+    phase = ifelse(phase == "e", "Exponential", "Stationary")
+  ) %>%
+  unite("samp", clean, charge, sep = " ") %>%
+  ggplot(., aes(samp, n_peak_area, fill = repl)) +
+  geom_boxplot(outlier.size = .2, show.legend = FALSE) +
+  scale_y_log10(labels = trans_format("log10", math_format(10 ^ .x))) +
+  facet_wrap( ~ phase, ncol = 1) +
+  theme_bw() +
+  theme(
+    text = element_text(size = 12),
+    axis.text.x = element_text(angle = 90, vjust = .5),
+    panel.grid = element_blank()
+  ) +
+  labs(x = NULL,
+       y = "Normalized peak area") +
+  geom_text(
+    inherit.aes = FALSE,
+    data = ann.df,
+    aes(
+      x = x,
+      y = y,
+      label = label,
+      color = label
+    ),
+    show.legend = FALSE
+  )
 
 p.dists
 ```
+
 
 ### Correlations
 
@@ -115,10 +122,10 @@ cor.df <- as_tibble(cor.res, rownames = "samp1") %>%
 # this uses this list of strings which are eventually interpreted
 # to create a list of sets of cors that are eventually joined
 filter.vecs <- list(
-  "Pair-\nwise" = "!is.na(R)",
-  "Repli-\ncates" = "line1 == line2 & phase1 == phase2",
-  "Intra-\nphase" = "phase1 == phase2",
-  "Inter-\nphase" = "line1 == line2 & phase1 != phase2"
+  "Pairwise" = "!is.na(R)",
+  "Replicates" = "line1 == line2 & phase1 == phase2",
+  "Intraphase" = "phase1 == phase2",
+  "Interphase" = "line1 == line2 & phase1 != phase2"
 )
 
 # lapply over this list to group the different kinds of correlations
@@ -136,11 +143,11 @@ pa.df <- marked.cors %>%
 
 Plot it.
 ```{r}
-comps <- list(c("Intra-\nphase", "Inter-\nphase"))
+comps <- list(c("Intraphase", "Interphase"))
 
 p.cors <- pa.df %>%
   ggplot(., aes(type, R)) +
-  geom_boxplot(outlier.size = 1, color = "black") +
+  geom_boxplot(outlier.size = .5, color = "black") +
   theme_bw() +
   theme(
     text = element_text(size = 13),
@@ -149,88 +156,18 @@ p.cors <- pa.df %>%
     panel.grid = element_blank()
   ) +
   labs(x = NULL) +
-  scale_y_continuous(limits = c(.4, 1.1)) +
+  scale_y_continuous(limits = c(0, 1.1),
+                     breaks = seq(0, 1, .25),
+                     name = "Pearson correlation of\nmetabolite abundances") +
   stat_compare_means(
     comparisons = comps,
-    vjust = -.5,
+    vjust = -.2,
     method.args = list(alternative = "greater")
   )
 
 p.cors
 ```
 
-Sample to sample correlations, except split by who being compared to who (i.e. anc to evo, ex to st, etc). What's compared is glucose_negative between samples, meaning compound+charge are the variables here. This time, with means. 
-```{r}
-cor.input2 <- df %>%
-  filter(is_standard == FALSE) %>%
-  group_by(charge, line, phase, compound) %>%
-  summarise(mean_pa = mean(n_peak_area)) %>%
-  ungroup() %>%
-  unite("cc", charge, compound, sep = "_") %>%
-  unite("sample", line, phase, sep = "_") %>%
-  select(cc, sample, mean_pa) %>%
-  mutate(mean_pa = log10(mean_pa)) %>%
-  pivot_wider(names_from = sample, values_from = mean_pa) %>%
-  column_to_rownames("cc")
-
-cor.res2 <- cor(cor.input2)
-
-# remove redundancy
-cor.res2[lower.tri(cor.res2)] <- NA
-
-# reshape to a tidy data frame with complete info on line, phase, repl, etc
-cor.df2 <- as_tibble(cor.res2, rownames = "samp1") %>%
-  pivot_longer(where(is.numeric),
-               names_to = "samp2",
-               values_to = "R") %>%
-  filter(samp1 != samp2 & !is.na(R)) %>%
-  separate(samp1,
-           into = c("line1", "phase1"),
-           sep = "_") %>%
-  separate(samp2,
-           into = c("line2", "phase2"),
-           sep = "_")
-
-# this uses this list of strings which are eventually interpreted
-# to create a list of sets of cors that are eventually joined
-filter.vecs <- list(
-  "Pair-\nwise" = "!is.na(R)",
-  "Intra-\nphase" = "phase1 == phase2",
-  "Inter-\nphase" = "line1 == line2 & phase1 != phase2"
-)
-
-# lapply over this list to group the different kinds of correlations
-marked.cors2 <- lapply(filter.vecs, function(y) {
-  cor.df2 %>%
-    filter(eval(parse(text = y)))
-}) %>%
-  bind_rows(.id = "type")
-
-pb.df <- marked.cors2 %>%
-  select(type, R) %>% 
-  mutate(type = factor(type, names(filter.vecs)))
-```
-
-Plot it.
-```{r}
-p.cors2 <- pb.df %>%
-  ggplot(., aes(type, R)) +
-  geom_boxplot(outlier.size = 1, color = "black") +
-  theme_bw() +
-  theme(
-    text = element_text(size = 13),
-    legend.position = c(.85, .13),
-    legend.background = element_blank(),
-    panel.grid = element_blank()
-  ) +
-  labs(x = NULL) +
-  stat_compare_means(comparisons = comps,
-                     vjust = -.5,
-                     method.args = list(alternative = "greater")) +
-  scale_y_continuous(limits = c(.4, 1.1))
-
-p.cors2
-```
 
 ### Comparison of values across ionization modes
 
@@ -286,39 +223,38 @@ charge.cors
 
 plot it
 ```{r}
-p.charge.r <- charge.cors %>% 
-  ggplot(., aes(x = "", R))+
-  geom_boxplot(outlier.color = NA)+
-  geom_jitter(height = 0, width = .2, size = 1)+
-  theme_bw()+
-  theme(text = element_text(size = 13),
-        panel.grid = element_blank(),
-        axis.ticks.x = element_blank())+
+p.charge.r <- charge.cors %>%
+  ggplot(., aes(x = "", R)) +
+  geom_boxplot(outlier.color = NA) +
+  geom_jitter(height = 0,
+              width = .2,
+              size = 1) +
+  theme_bw() +
+  theme(
+    text = element_text(size = 13),
+    panel.grid = element_blank(),
+    axis.ticks.x = element_blank()
+  ) +
   labs(x = NULL,
-       y = "R of ion modes")
+       y = "R of ion modes") +
+  scale_y_continuous(limits = c(0, 1.1),
+                     breaks = seq(0, 1, .25),
+                     name = "Pearson correlation of\n ionization modes")
 
 p.charge.r
 ```
 
 
-```{r fig.width = 6.51, fig.height = 5}
-top <- p.dists
+```{r fig.width = 6.51, fig.height = 6.4}
+bottom <- p.dists
 
-bottom <- (p.cors | p.cors2 | p.charge.r) + plot_layout(widths = c(.5, .4, .1))
+top <- (p.cors | p.charge.r) + plot_layout(widths = c(.8, .2))
 
-ff <- (top / bottom) + plot_annotation(tag_levels = "A")
+ff <- (top / bottom) + plot_annotation(tag_levels = "A") + plot_layout(heights = c(.44, .56))
 
 ff
 ```
 
 ```{r}
-ggsave(plot = ff, filename = "../../figures/standards_and_cors.pdf", width = 6.51, height = 5)
+ggsave(plot = ff, filename = "../../figures/standards_and_cors.pdf", width = 6.51, height = 6.4)
 ```
-
-### Untargeted data
-
-How much stuff is in the untargeted data? Depends how you count, i.e. does it have a name, formula, MW, RT, all of them, some of them, etc.
-```{r}
-untarg
-```
-

@@ -191,67 +191,13 @@ plist <- lapply(nad.combs, function(x) {
     scale_color_manual(values = c("black", "red"), name = "Ionization mode", guide = "none")
 })
 
-nad.cors <- wrap_plots(plist, ncol = 2)
-```
-
-### change across growth phases
-
-```{r}
-xlabs <- c(
-  "GS Ex",
-  "GS St",
-  "GSSG Ex",
-  "GSSG St",
-  "AS Ex",
-  "AS St"
-)
-
-fac.labs <- c("positive" = "Positive mode", "negative" = "Negative mode")
-
-p.boxes <- df %>% 
-  filter(compound %in% c("NAD+", "NADH", "NADP+", "NADPH")) %>% 
-  group_by(charge, clean, phase, compound) %>% 
-  summarise(mpa = mean((n_peak_area))) %>% 
-  ungroup() %>% 
-  mutate(phase = ifelse(phase == "e", "Ex", "St"),
-         paired = paste(clean, compound),
-         colz = ifelse(grepl("R0", clean), "anc", "evo")) %>% 
-  arrange(desc(colz)) %>% 
-  ggplot(., aes(interaction(phase, compound), mpa))+
-  geom_boxplot(color = "grey70", outlier.size = NULL)+
-  geom_point(aes(color = colz), size = .5)+
-  geom_line(aes(group = interaction(paired, compound), color = colz), alpha = .5)+
-  facet_wrap(~charge, labeller = as_labeller(fac.labs), ncol = 1)+
-  theme_bw()+
-  theme(panel.grid = element_blank(),
-        text = element_text(size = 13),
-        legend.position = c(.8, .93),
-        legend.background = element_blank(),
-        axis.text.x = element_text(angle = 30, hjust = 1))+
-  scale_x_discrete()+
-  labs(x = NULL,
-       y = "Normalized peak area")+
-  scale_color_manual(values = c("chocolate1", "cadetblue"), name = NULL, labels = c("Ancestor", "Evolved"))+
-  scale_y_log10(labels = trans_format("log10", math_format(10^.x)))
-
-p.boxes
+nad.cors <- wrap_plots(plist, ncol = 3)
 ```
 
 ### Final figure
 
-This is a pretty hacky use of various patchwork functions but without this, the long text labels of panel A force the y axis labels for panel B to be extremely far from the graph.
-```{r width = 6.5, height = 7}
-top <- dp.list$NAD
-
-bottom <- nad.cors | p.boxes
-
-# ff <- (top / wrap_elements(full = bottom)) + plot_layout(heights = c(.3, .7)) + plot_annotation(tag_levels = "A")
-
-ff <- (top / bottom) + plot_layout(heights = c(.3, .7)) + plot_annotation(tag_levels = "A")
-```
-
-```{r}
-bottom <- cowplot::plot_grid(nad.cors, p.boxes, labels = c("B", "C"), label_fontface = "plain")
+```{r fig.width = 6.51, fig.height = 7}
+bottom <- cowplot::plot_grid(nad.cors, labels = c("B"), label_fontface = "plain")
 
 ff <- cowplot::plot_grid(dp.list$NAD, bottom, ncol = 1, labels = c("A", "", ""), rel_heights = c(.35, .65), label_fontface = "plain")
 

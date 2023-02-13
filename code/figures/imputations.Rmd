@@ -62,30 +62,37 @@ lapply(test.names, line_breaker)
 ```
 
 Shows that the imputations fall in line with expectations, i.e. that they're all small.
-```{r fig.width = 6.51, fig.height = 7}
-p <- df %>% 
-  filter(compound %in% impd.comps) %>% 
-  rowwise() %>% 
-  mutate(compound = line_breaker(compound)) %>% 
-  ungroup() %>% 
-  mutate(charge = ifelse(charge == "positive", "(+)", "(-)"),
-         phase = ifelse(phase == "e", "Ex", "St"),
-         was_imputed = ifelse(was_imputed == 1, "Imputed", "Not imputed")) %>% 
-  unite("sample", charge, phase, sep = "") %>% 
-  select(compound, sample, n_peak_area, was_imputed) %>% 
-  ggplot(., aes(sample, n_peak_area, color = was_imputed))+
-  geom_jitter(height = 0, width = .2, size = .1)+
-  facet_wrap(~ compound, scales = "free_x", ncol = 6)+
-  scale_color_manual(values = c("blue", "black"), name = NULL)+
-  scale_y_log10(labels = trans_format("log10", math_format(10^.x)))+
-  theme_bw()+
-  theme(panel.grid = element_blank(),
-        strip.text = element_text(size = 7),
-        text = element_text(size = 9),
-        legend.position = "bottom")+
+```{r fig.width = 6.51, fig.height = 7.5}
+p <- df %>%
+  filter(compound %in% impd.comps) %>%
+  rowwise() %>%
+  mutate(compound = line_breaker(compound)) %>%
+  ungroup() %>%
+  mutate(
+    charge = ifelse(charge == "positive", "(+)", "(-)"),
+    phase = ifelse(phase == "e", "Ex", "St"),
+    was_imputed = ifelse(was_imputed == 1, "Imputed", "Not imputed")
+  ) %>%
+  unite("sample", charge, phase, sep = "") %>%
+  select(compound, sample, n_peak_area, was_imputed) %>%
+  ggplot(., aes(sample, n_peak_area, color = was_imputed)) +
+  geom_jitter(height = 0,
+              width = .3,
+              size = .2) +
+  facet_wrap( ~ compound, scales = "free_x", ncol = 6) +
+  scale_color_manual(values = c("orange3", "black"), name = NULL) +
+  scale_y_log10(labels = trans_format("log10", math_format(10 ^ .x))) +
+  theme_bw() +
+  theme(
+    panel.grid = element_blank(),
+    strip.text = element_text(size = 7),
+    text = element_text(size = 9),
+    axis.text.x = element_text(size = 6),
+    legend.position = "bottom"
+  ) +
   labs(x = NULL,
-       y = "Normalized peak area")+
-  guides(colour = guide_legend(override.aes = list(size=2)))
+       y = "Normalized peak area") +
+  guides(colour = guide_legend(override.aes = list(size = 2)))
 
 p 
 ```
@@ -121,7 +128,7 @@ tc - complete.comps
 ```
 
 ```{r}
-ggsave(plot = p, filename = "../../figures/imputations.pdf", width = 6.51, height = 6.2)
+ggsave(plot = p, filename = "../../figures/imputations.pdf", width = 6.51, height = 7.7)
 ```
 
 ```{r}
