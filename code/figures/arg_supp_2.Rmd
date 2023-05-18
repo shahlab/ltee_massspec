@@ -1,0 +1,289 @@
+---
+title: "Arg supp"
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+author: "John Favate"
+date: "`r Sys.time()`"
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 1500px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+```{r}
+# Prevent printing of warnings and such in the HTML
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, fig.align = "center")
+```
+
+```{r}
+library(tidyverse)
+library(ggpubr)
+library(patchwork)
+```
+
+```{r}
+df <- read_csv("../../data_frames/targeted_with_imps.csv") %>% 
+  filter(is_standard == FALSE) %>% 
+  unite("cc", compound, charge, sep = " ", remove = FALSE) %>% 
+  unite("ccp", compound, charge, phase, sep = " ", remove = FALSE)
+
+mut.lines <- c("A-1", "A-2", "A-3", "A-4", "A+3", "A+6")
+
+clean.names <- data.frame(line = unique(df$line)) %>%
+  mutate(clean = case_when(
+    grepl("ap", line) ~ str_replace(line, "ap", "A+"),
+    grepl("am", line) ~ str_replace(line, "am", "A-"),
+    grepl("rel", line) ~ str_replace(line, "rel60", "R0")
+  ))
+
+# combine them and change the one compounds name so it matches the name on fig1
+df <- left_join(df, clean.names) %>% 
+  mutate(is_mutator = clean %in% mut.lines,
+         compound = ifelse(compound == "Nicotinamide ribotide", "Nicotinamide mononucleotide", compound))
+```
+
+```{r}
+arg <- c(
+    "Aspartate",
+    "Carbamoyl phosphate",
+    "Citrulline",
+    "Glutamate",
+    "Glutamine",
+    "L-arginino-succinate",
+    "N-acetyl-glutamate",
+    "N-acetyl-L-ornithine",
+    "Ornithine",
+    "S-adenosyl-L-methionine",
+    "Arginine"
+)
+
+comp.df <- df %>%
+  filter(compound %in% arg) %>%
+  mutate(
+    charge = ifelse(charge == "positive", "(+)", "(-)"),
+    phase = ifelse(phase == "e", "Exponential", "Stationary")
+  )
+
+# get evo values
+evo.pa <- comp.df %>%
+  filter(!grepl("R0", clean)) %>%
+  group_by(clean, phase, compound, charge) %>%
+  summarise(evompa = mean(n_peak_area)) %>%
+  ungroup()
+
+# get ancestral values
+anc.pa <- comp.df %>%
+  filter(grepl("R0", clean)) %>%
+  group_by(phase, compound, charge) %>%
+  summarise(ancmpa = mean(n_peak_area)) %>%
+  ungroup()
+
+# combine and calc changes
+fc.df <-
+  left_join(evo.pa, anc.pa, by = c("phase", "compound", "charge")) %>%
+  mutate(l2rat = log2(evompa / ancmpa),
+         compound = factor(compound, arg))
+
+fc.df
+```
+
+Retain + mode for most things, and - mode for those that don't exist in positive
+```{r}
+fc.df <- lapply(arg, function(x){
+  tmp <- fc.df %>% 
+    filter(compound == x)
+  
+  if (length(unique(tmp$charge)) == 2){
+    t2 <- fc.df %>%
+      filter(compound == x & charge == "(+)")
+  } else {
+    t2 <- fc.df %>%
+      filter(compound == x & charge == "(-)")
+  }
+
+  return(t2)
+}) %>% 
+  bind_rows() %>% 
+  unite("cc", compound, charge, sep = " ") %>% 
+  filter(phase == "Exponential")
+```
+cluster lines on metabs
+```{r}
+line.order <- fc.df %>% 
+  select(clean, cc, l2rat) %>% 
+  pivot_wider(names_from = cc, values_from = l2rat) %>% 
+  column_to_rownames("clean") %>% 
+  dist() %>% 
+  hclust() %>% 
+  .$order
+
+real.order <- fc.df %>% 
+  select(clean, cc, l2rat) %>% 
+  pivot_wider(names_from = cc, values_from = l2rat) %>% 
+  pull(clean) %>% 
+  .[line.order]
+```
+
+```{r fig.height = 7, fig.width = 6.21}
+mets <- fc.df %>%
+  mutate(facs = "Metabolites") %>% 
+  ggplot(., aes(cc, factor(clean, real.order), fill = l2rat)) +
+  geom_tile() +
+  theme_bw() +
+  theme(
+    text = element_text(size = 12),
+    axis.text.x = element_text(
+      angle = 90,
+      hjust = 1,
+      vjust = .5
+    ),
+    panel.background = element_blank(),
+    panel.grid = element_blank(),
+    legend.position = "bottom"
+  ) +
+  scale_fill_gradientn(
+    colors = c("indianred", "white", "steelblue"),
+    limits = c(-max(fc.df$l2rat), max(fc.df$l2rat)),
+    name = expression(paste(log[2], "(FC)"))
+  ) +
+  labs(x = NULL,
+       y = NULL)+
+  facet_wrap(~facs)
+
+mets
+```
+
+Then the genes
+```{r}
+all.data <- read_csv("/data/john/projects/3ltee/data_frames/all_data.csv") %>% 
+  filter(k12_name %in% paste0("arg", LETTERS[1:9])) %>% 
+  dplyr::select(line, k12_name, ds_log2foldchange_rna, ds_padj_rna) %>% 
+  mutate(line = str_replace(line, "ra-", "-") %>% str_replace(., "ra\\+", "\\+")) %>% 
+  mutate(labz = ifelse(ds_padj_rna <= .01, "*", ""))
+
+ap6 <- data.frame(
+  k12_name = paste0("arg", LETTERS[1:9])
+) %>% 
+  filter(k12_name != "argF") %>% 
+  mutate(line = rep("A+6", nrow(.)),
+         ds_padj_rna = rep(NA, nrow(.)),
+         ds_log2foldchange_rna = rep(NA, nrow(.)),
+         labz = rep(NA, nrow(.)))
+
+genes <- all.data %>%
+  bind_rows(ap6) %>% 
+  mutate(facs = "RNAseq") %>% 
+  ggplot(., aes(k12_name, factor(line, real.order), fill = ds_log2foldchange_rna, label = labz)) +
+  geom_tile() +
+  geom_text() +
+  theme_bw() +
+  theme(
+    text = element_text(size = 12),
+    axis.text.x = element_text(
+      angle = 90,
+      hjust = 1,
+      vjust = .5
+    ),
+    panel.background = element_blank(),
+    panel.grid = element_blank(),
+    legend.position = "bottom"
+  ) +
+  scale_fill_gradientn(
+    colors = c("indianred", "white", "steelblue"),
+    limits = c(
+      -max(all.data$ds_log2foldchange_rna),
+      max(all.data$ds_log2foldchange_rna)
+    ),
+    name = expression(paste(log[2], "(FC)"))
+  ) +
+  labs(x = NULL,
+       y = NULL)+
+  facet_wrap(~facs)
+
+genes
+```
+
+```{r fig.height = 6.5, fig.width = 6.21}
+(ff <- (mets | genes) + plot_annotation(tag_levels = "A"))
+```
+
+Only this one is saved
+```{r}
+ggsave(plot = ff, filename = "../../figures/arg_supp_2.pdf", width = 6.21, height = 6.5)
+```
+
+
+The line plot, which is too hard to read
+```{r}
+fc.df %>% 
+  ggplot(., aes(cc, l2rat, group = clean, color = clean))+
+  geom_point(height = 0, width = .2)+
+  geom_line()
+```
+
+Genes FC vs metabs FC, but I wouldn't expect a 1:1 correlation anyway. 
+```{r}
+g <- c("argA", "argD", "argE", "argI", "argG", "argH")
+m <- c("N-acetyl-glutamate", "N-acetyl-L-ornithine", "Ornithine", "Citrulline", "L-arginino-succinate", "Arginine")
+```
+
+```{r}
+comp.df2 <- df %>%
+  filter(compound %in% arg) %>%
+  mutate(
+    charge = ifelse(charge == "positive", "(+)", "(-)"),
+    phase = ifelse(phase == "e", "Exponential", "Stationary")
+  )
+
+# get evo values
+evo.pa2 <- comp.df %>%
+  filter(!grepl("R0", clean)) %>%
+  group_by(clean, phase, compound, charge) %>%
+  summarise(evompa = mean(n_peak_area)) %>%
+  ungroup()
+
+# get ancestral values
+anc.pa2 <- comp.df %>%
+  filter(grepl("R0", clean)) %>%
+  group_by(phase, compound, charge) %>%
+  summarise(ancmpa = mean(n_peak_area)) %>%
+  ungroup()
+
+# combine and calc changes
+fc.df2 <-
+  left_join(evo.pa, anc.pa, by = c("phase", "compound", "charge")) %>%
+  mutate(l2rat = log2(evompa / ancmpa),
+         compound = factor(compound, arg)) %>% 
+  filter(phase == "Exponential")
+
+ad2 <- all.data %>% 
+  dplyr::rename("clean" = "line")
+```
+
+
+```{r fig.width = 16, fig.height = 3.75}
+data.frame(k12_name = g,
+           compound = m) %>%
+  left_join(., ad2, by = c("k12_name")) %>%
+  left_join(., fc.df2, by = c("compound", "clean")) %>%
+  unique() %>% 
+  ggplot(., aes(ds_log2foldchange_rna, l2rat, color = charge)) +
+  geom_point() +
+  facet_grid(charge~clean) +
+  geom_abline(aes(slope = 1, intercept = 0), linetype = 5)+
+  ggpubr::stat_cor(size = 3)+
+  scale_color_manual(values = c("black", "red"), guide = "none")+
+  theme_bw()+
+  theme(text = element_text(size = 14),
+        panel.grid = element_blank())+
+  labs(x = "RNAseq l2fc",
+       y = "Metabolite l2fc")
+```
+
+
